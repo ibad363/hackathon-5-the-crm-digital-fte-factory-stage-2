@@ -1,0 +1,15 @@
+openai
+pydantic
+fastapi
+uvicorn
+asyncpg
+aiokafka
+google-api-python-client
+google-auth-oauthlib
+twilio
+pytest
+pytest-asyncio
+locust
+python-dotenv
+sqlalchemy
+psycopg2-binary
