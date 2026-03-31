@@ -10,7 +10,7 @@ load_dotenv()
 logger = logging.getLogger(__name__)
 
 # Initialize OpenAI Client for embeddings
-client = AsyncOpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+client = AsyncOpenAI(api_key=os.getenv("OPENROUTER_API_KEY"))
 
 async def get_db_pool():
     """Create a connection pool for the CRM database."""
