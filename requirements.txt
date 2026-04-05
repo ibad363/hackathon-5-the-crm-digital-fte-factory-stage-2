@@ -1,11 +1,14 @@
 openai
 pydantic
+pydantic[email]
 fastapi
 uvicorn
 asyncpg
 aiokafka
 google-api-python-client
 google-auth-oauthlib
+google-auth-httplib2
+google-cloud-pubsub
 twilio
 pytest
 pytest-asyncio
@@ -13,3 +16,5 @@ locust
 python-dotenv
 sqlalchemy
 psycopg2-binary
+sentence-transformers
+openai-agents
