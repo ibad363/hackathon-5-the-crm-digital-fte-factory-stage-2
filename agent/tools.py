@@ -1,10 +1,13 @@
 # production/agent/tools.py
 import logging
+import uuid
 from typing import Optional, List, Annotated
 from pydantic import BaseModel, Field
-from agents import function_tool, RunContextWrapper
+from agents import function_tool
 from database.queries import get_db_pool, generate_embedding
 
+# Configure logging
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
 # --- 1. Input Schemas (Pydantic Models) ---
@@ -12,14 +15,15 @@ logger = logging.getLogger(__name__)
 class KnowledgeSearchInput(BaseModel):
     """Input schema for knowledge base search."""
     query: Annotated[str, Field(description="The customer's question or search query")]
-    max_results: Annotated[int, Field(default=5, ge=1, le=10, description="The maximum number of results to return")]
-    category: Annotated[Optional[str], Field(default=None, description="Optional category filter")]
+    max_results: Annotated[int, Field(default=3, ge=1, le=10, description="The maximum number of results to return")]
+    category: Annotated[Optional[str], Field(default=None, description="Optional category filter (Company, Product, Voice, Escalation)")]
 
 class TicketCreationInput(BaseModel):
     """Input schema for ticket creation."""
     customer_id: Annotated[str, Field(description="The unique ID of the customer (UUID)")]
-    subject: Annotated[str, Field(description="A brief subject or title for the support issue")]
-    description: Annotated[str, Field(description="A detailed description of the problem")]
+    conversation_id: Annotated[str, Field(description="The current conversation ID (UUID)")]
+    channel: Annotated[str, Field(description="The source channel (email, whatsapp, web_form)")]
+    category: Annotated[Optional[str], Field(default=None, description="The category of the support issue")]
     priority: Annotated[str, Field(default="medium", pattern="^(low|medium|high|urgent)$", description="The priority level")]
 
 class CustomerHistoryInput(BaseModel):
@@ -31,12 +35,13 @@ class EscalationInput(BaseModel):
     """Input schema for escalating to a human."""
     customer_id: Annotated[str, Field(description="The unique ID of the customer (UUID)")]
     conversation_id: Annotated[str, Field(description="The current conversation ID (UUID)")]
-    reason: Annotated[str, Field(description="The specific reason for escalation (e.g., pricing query, legal threat, user frustration)")]
+    reason: Annotated[str, Field(description="The specific reason for escalation (e.g., pricing_inquiry, refund_request, legal_threat)")]
+    escalate_to: Annotated[Optional[str], Field(default="support_team", description="Who to escalate to")]
 
 class ResponseInput(BaseModel):
     """Input schema for sending a response back to the customer."""
     conversation_id: Annotated[str, Field(description="The current conversation ID (UUID)")]
-    channel: Annotated[str, Field(pattern="^(gmail|whatsapp|web-form)$", description="The communication channel")]
+    channel: Annotated[str, Field(pattern="^(email|whatsapp|web_form)$", description="The communication channel")]
     content: Annotated[str, Field(description="The actual message content (formatted appropriately for the channel)")]
 
 # --- 2. Production Tools (OpenAI Agents SDK) ---
@@ -48,35 +53,55 @@ async def search_knowledge_base(input: KnowledgeSearchInput) -> str:
     how to use something, or needs technical information.
     Returns: Formatted search results with relevance scores.
     """
+    print(f"\n🔍 [TOOL CALL] search_knowledge_base")
+    print(f"   Query: {input.query}")
+    print(f"   Category: {input.category}")
+
     try:
         pool = await get_db_pool()
         async with pool.acquire() as conn:
             # Generate embedding for semantic search
             embedding = await generate_embedding(input.query)
+            embedding_str = str(embedding)
 
             # Query with vector similarity
-            results = await conn.fetch("""
-                SELECT title, content, category,
-                1 - (embedding <=> $1::vector) as similarity
-                FROM knowledge_base
-                WHERE ($2::text IS NULL OR category = $2)
-                ORDER BY embedding <=> $1::vector
-                LIMIT $3
-            """, embedding, input.category, input.max_results)
+            if input.category:
+                results = await conn.fetch("""
+                    SELECT title, content, category,
+                    1 - (embedding <=> $1) as similarity
+                    FROM knowledge_base
+                    WHERE category = $2
+                    ORDER BY embedding <=> $1
+                    LIMIT $3
+                """, embedding_str, input.category, input.max_results)
+            else:
+                results = await conn.fetch("""
+                    SELECT title, content, category,
+                    1 - (embedding <=> $1) as similarity
+                    FROM knowledge_base
+                    ORDER BY embedding <=> $1
+                    LIMIT $2
+                """, embedding_str, input.max_results)
 
             if not results:
-                return "No relevant documentation found. Consider escalating to human support."
+                response = "No relevant documentation found. Consider escalating to human support."
+                print(f"   ❌ Result: {response}")
+                return response
 
             # Format results for the agent
             formatted = []
             for r in results:
-                formatted.append(f"**{r['title']}** (relevance: {r['similarity']:.2f})\n{r['content'][:500]}")
+                formatted.append(f"**{r['title']}** (Category: {r['category']}, Relevance: {r['similarity']:.2f})\n{r['content'][:500]}...")
 
-            return "\n\n---\n\n".join(formatted)
+            response = "\n\n---\n\n".join(formatted)
+            print(f"   ✅ Result: Found {len(results)} results")
+            return response
 
     except Exception as e:
         logger.error(f"Knowledge base search failed: {e}")
-        return "Knowledge base temporarily unavailable. Please try again or escalate."
+        response = "Knowledge base temporarily unavailable. Please try again or escalate."
+        print(f"   ❌ Error: {e}")
+        return response
 
 @function_tool
 async def create_ticket(input: TicketCreationInput) -> str:
@@ -84,20 +109,31 @@ async def create_ticket(input: TicketCreationInput) -> str:
     MUST be called at the very start of every conversation.
     Returns: The newly created ticket ID and confirmation.
     """
+    print(f"\n🎫 [TOOL CALL] create_ticket")
+    print(f"   Customer ID: {input.customer_id}")
+    print(f"   Conversation ID: {input.conversation_id}")
+    print(f"   Channel: {input.channel}")
+
     try:
         pool = await get_db_pool()
         async with pool.acquire() as conn:
             ticket_id = await conn.fetchval("""
-                INSERT INTO tickets (customer_id, subject, description, priority)
-                VALUES ($1, $2, $3, $4)
+                INSERT INTO tickets (conversation_id, customer_id, source_channel, category, priority)
+                VALUES ($1, $2, $3, $4, $5)
                 RETURNING id
-            """, input.customer_id, input.subject, input.description, input.priority)
+            """, uuid.UUID(input.conversation_id), uuid.UUID(input.customer_id),
+                input.channel, input.category, input.priority)
 
-            return f"Ticket successfully created. ID: {ticket_id}. I am now looking into this for you."
+            response = f"Ticket successfully created. ID: {ticket_id}. I am now looking into this for you."
+            print(f"   ✅ Result: {response}")
+            logger.info(f"Ticket created: {ticket_id}")
+            return response
 
     except Exception as e:
         logger.error(f"Ticket creation failed: {e}")
-        return "Failed to create a ticket. Please try again or escalate."
+        response = "Failed to create a ticket. Please try again or escalate."
+        print(f"   ❌ Error: {e}")
+        return response
 
 @function_tool
 async def get_customer_history(input: CustomerHistoryInput) -> str:
@@ -105,32 +141,42 @@ async def get_customer_history(input: CustomerHistoryInput) -> str:
     Use this to maintain continuity and provide personalized support.
     Returns: A list of recent messages across all channels.
     """
+    print(f"\n📜 [TOOL CALL] get_customer_history")
+    print(f"   Customer ID: {input.customer_id}")
+    print(f"   Limit: {input.limit}")
+
     try:
         pool = await get_db_pool()
         async with pool.acquire() as conn:
             results = await conn.fetch("""
-                SELECT m.channel, m.direction, m.content, m.timestamp
+                SELECT m.channel, m.direction, m.role, m.content, m.created_at
                 FROM messages m
                 JOIN conversations c ON m.conversation_id = c.id
                 WHERE c.customer_id = $1
-                ORDER BY m.timestamp DESC
+                ORDER BY m.created_at DESC
                 LIMIT $2
-            """, input.customer_id, input.limit)
+            """, uuid.UUID(input.customer_id), input.limit)
 
             if not results:
-                return "No previous history found for this customer."
+                response = "No previous history found for this customer. This is a new customer."
+                print(f"   ℹ️ Result: {response}")
+                return response
 
             # Format history for the agent
             history = []
             for r in results:
                 direction = "OUT" if r['direction'] == 'outbound' else "IN"
-                history.append(f"[{r['timestamp'].strftime('%Y-%m-%d %H:%M')}] {r['channel'].upper()} {direction}: {r['content']}")
+                history.append(f"[{r['created_at'].strftime('%Y-%m-%d %H:%M')}] {r['channel'].upper()} {direction} ({r['role']}): {r['content'][:100]}...")
 
-            return "\n".join(reversed(history))
+            response = "\n".join(reversed(history))
+            print(f"   ✅ Result: Found {len(results)} messages")
+            return response
 
     except Exception as e:
         logger.error(f"History retrieval failed: {e}")
-        return "History currently unavailable. Please proceed with the current interaction."
+        response = "History currently unavailable. Please proceed with the current interaction."
+        print(f"   ❌ Error: {e}")
+        return response
 
 @function_tool
 async def escalate_to_human(input: EscalationInput) -> str:
@@ -139,51 +185,70 @@ async def escalate_to_human(input: EscalationInput) -> str:
     legal issues, or if the KB search fails repeatedly.
     Returns: Confirmation of escalation.
     """
+    print(f"\n🚨 [TOOL CALL] escalate_to_human")
+    print(f"   Conversation ID: {input.conversation_id}")
+    print(f"   Reason: {input.reason}")
+    print(f"   Escalate To: {input.escalate_to}")
+
     try:
         pool = await get_db_pool()
         async with pool.acquire() as conn:
-            # Update conversation status to 'escalated'
+            # Update conversation status to 'escalated' and set escalated_to
             await conn.execute("""
-                UPDATE conversations SET status = 'escalated'
+                UPDATE conversations
+                SET status = 'escalated', escalated_to = $2
                 WHERE id = $1
-            """, input.conversation_id)
+            """, uuid.UUID(input.conversation_id), input.escalate_to)
 
-            # Update ticket status if exists (assume one open ticket per conversation)
+            # Update ticket status if exists
             await conn.execute("""
                 UPDATE tickets SET status = 'escalated'
-                WHERE customer_id = $1 AND status != 'resolved'
-            """, input.customer_id)
+                WHERE conversation_id = $1 AND status NOT IN ('resolved', 'closed')
+            """, uuid.UUID(input.conversation_id))
 
             # Log the escalation message
-            logger.warning(f"CONVERSATION ESCALATED: {input.conversation_id}. Reason: {input.reason}")
+            logger.warning(f"CONVERSATION ESCALATED: {input.conversation_id}. Reason: {input.reason}. To: {input.escalate_to}")
 
-            return f"Conversation has been successfully escalated to a human specialist. Reason: {input.reason}. They will be in touch shortly."
+            response = f"Conversation has been successfully escalated to {input.escalate_to}. Reason: {input.reason}. A human specialist will be in touch shortly."
+            print(f"   ✅ Result: {response}")
+            return response
 
     except Exception as e:
         logger.error(f"Escalation failed: {e}")
-        return "Escalation failed. Please try again."
+        response = "Escalation failed. Please try again."
+        print(f"   ❌ Error: {e}")
+        return response
 
 @function_tool
 async def send_response(input: ResponseInput) -> str:
     """Send the final AI response back to the customer via the original channel.
     This tool formats the message and dispatches it to the appropriate channel handler.
+    ALWAYS use this tool to send your final response to the customer.
     Returns: Confirmation of transmission.
     """
+    print(f"\n📤 [TOOL CALL] send_response")
+    print(f"   Conversation ID: {input.conversation_id}")
+    print(f"   Channel: {input.channel}")
+    print(f"   Content: {input.content[:100]}...")
+
     try:
-        # 1. Log the outbound message in the database
         pool = await get_db_pool()
         async with pool.acquire() as conn:
+            # Log the outbound message in the database with role='agent'
             await conn.execute("""
-                INSERT INTO messages (conversation_id, channel, direction, content)
-                VALUES ($1, $2, 'outbound', $3)
-            """, input.conversation_id, input.channel, input.content)
+                INSERT INTO messages (conversation_id, channel, direction, role, content, delivery_status)
+                VALUES ($1, $2, 'outbound', 'agent', $3, 'sent')
+            """, uuid.UUID(input.conversation_id), input.channel, input.content)
 
-            # 2. Trigger the channel dispatcher (this will be picked up by a Kafka producer or specific handler)
-            # For now, we simulate success
+            # Trigger the channel dispatcher (this will be picked up by a Kafka producer or specific handler)
             logger.info(f"RESPONSE DISPATCHED to {input.channel.upper()}: {input.content[:50]}...")
 
-            return f"Response successfully queued for {input.channel.upper()}."
+            response = f"Response successfully sent via {input.channel.upper()}."
+            print(f"   ✅ Result: {response}")
+            return response
 
     except Exception as e:
         logger.error(f"Response dispatch failed: {e}")
-        return "Failed to send response. Please try again."
+        response = "Failed to send response. Please try again."
+        print(f"   ❌ Error: {e}")
+        return response
