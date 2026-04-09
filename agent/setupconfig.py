@@ -9,10 +9,19 @@ load_dotenv()
 
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 NINEROUTER_API_KEY = os.getenv("NINEROUTER_API_KEY")
+OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
 
 
 if not GEMINI_API_KEY:
     raise ValueError("GEMINI_API_KEY environment variable not set")
+
+if not OPENROUTER_API_KEY:
+    raise ValueError("OPENROUTER_API_KEY environment variable not set")
+
+if not NINEROUTER_API_KEY:
+    raise ValueError("NINEROUTER_API_KEY environment variable not set")
+
+# GEMINI
 
 # external_client = AsyncOpenAI(
 #     api_key=GEMINI_API_KEY,
@@ -24,6 +33,8 @@ if not GEMINI_API_KEY:
 #     openai_client=external_client,
 # )
 
+# NINEROUTER
+
 # external_client = AsyncOpenAI(
 #     api_key=NINEROUTER_API_KEY,
 #     base_url="http://localhost:20128/v1",
@@ -34,10 +45,7 @@ if not GEMINI_API_KEY:
 #     openai_client=external_client,
 # )
 
-OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
-
-if not OPENROUTER_API_KEY:
-    raise ValueError("OPENROUTER_API_KEY environment variable not set")
+# OPENROUTER
 
 external_client = AsyncOpenAI(
     api_key=OPENROUTER_API_KEY,
@@ -45,7 +53,8 @@ external_client = AsyncOpenAI(
 )
 
 model = OpenAIChatCompletionsModel(
-    model="qwen/qwen3.6-plus:free",
+    # model="qwen/qwen3.6-plus:free",
+    model="nvidia/nemotron-3-super-120b-a12b:free",
     openai_client=external_client,
 )
 
