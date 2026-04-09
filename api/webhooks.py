@@ -13,6 +13,7 @@ import sys
 import json
 import base64
 import logging
+import threading
 from typing import Optional
 from datetime import datetime
 
@@ -35,14 +36,24 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter()
 
+# ---------------------------------------------------------------------------
+# Idempotency cache
+# Stores Pub/Sub messageIds we have already dispatched for processing.
+# Google retries a notification every 30 s until it receives HTTP 200.
+# Because we always return 200, retries are rare — but during the "backlog
+# flush" (after a period of 404s) many duplicate notifications arrive at once.
+# This set prevents the same email being processed more than once per session.
+# ---------------------------------------------------------------------------
+_seen_pubsub_ids: set[str] = set()
+_seen_lock = threading.Lock()
 
-# --- Pydantic Models ---
+# Gmail address that belongs to the AI — skip emails we sent ourselves
+OWN_EMAIL: str = os.getenv("GMAIL_ADDRESS", "ibad0352@gmail.com").lower()
 
-class PubSubMessage(BaseModel):
-    """Google Pub/Sub push message format."""
-    message: dict
-    subscription: str
 
+# ---------------------------------------------------------------------------
+# Pydantic models
+# ---------------------------------------------------------------------------
 
 class WebFormSubmission(BaseModel):
     """Web support form submission."""
@@ -53,11 +64,13 @@ class WebFormSubmission(BaseModel):
     phone: Optional[str] = None
 
 
-# --- Gmail Webhook ---
+# ---------------------------------------------------------------------------
+# Gmail webhook
+# ---------------------------------------------------------------------------
 
 @router.get("/gmail/ping")
 async def gmail_ping():
-    """Quick connectivity test — open this in browser to verify routing works."""
+    """Connectivity test — open in browser to verify the endpoint is reachable."""
     logger.info("✅ Gmail ping received!")
     return {"status": "ok", "message": "Gmail webhook endpoint is reachable!"}
 
@@ -65,245 +78,234 @@ async def gmail_ping():
 @router.post("/gmail")
 async def gmail_webhook(request: Request, background_tasks: BackgroundTasks):
     """
-    Gmail Pub/Sub webhook endpoint.
+    Gmail Pub/Sub push endpoint.
 
-    Receives push notifications when new emails arrive.
-    Processes emails in the background to respond quickly.
+    Google calls this within seconds of a new message arriving.
+    We acknowledge immediately (return 200) and process in the background
+    so Google never retries due to a slow response.
     """
     try:
-        # Log EVERYTHING about the raw request first
         raw_body = await request.body()
-        logger.info(f"📬 ===== Gmail webhook HIT =====")
-        logger.info(f"   Method: {request.method}")
-        logger.info(f"   URL: {request.url}")
-        logger.info(f"   Headers: {dict(request.headers)}")
-        logger.info(f"   Raw body ({len(raw_body)} bytes): {raw_body[:500]}")
 
-        # Parse body
         if not raw_body:
-            logger.warning("   ⚠️ Empty body received!")
+            logger.warning("⚠️ Gmail webhook: empty body — ignoring")
             return {"status": "acknowledged"}
 
         body = json.loads(raw_body)
-        logger.info(f"   Parsed body keys: {list(body.keys())}")
 
-        # Decode Pub/Sub data
-        if 'message' in body and 'data' in body['message']:
-            data = base64.b64decode(body['message']['data']).decode('utf-8')
-            pubsub_data = json.loads(data)
-            logger.info(f"   📧 Email address: {pubsub_data.get('emailAddress')}")
-            logger.info(f"   📧 History ID: {pubsub_data.get('historyId')}")
+        if "message" not in body or "data" not in body["message"]:
+            logger.warning(f"⚠️ Gmail webhook: unexpected payload shape — {list(body.keys())}")
+            return {"status": "acknowledged"}
 
-            # Process in background
-            background_tasks.add_task(process_gmail_notification, pubsub_data)
-        else:
-            logger.warning(f"   ⚠️ No 'message.data' found in body: {body}")
+        pubsub_msg   = body["message"]
+        pubsub_id    = pubsub_msg.get("messageId") or pubsub_msg.get("message_id", "")
+        pubsub_data  = json.loads(base64.b64decode(pubsub_msg["data"]).decode("utf-8"))
 
-        # Must return 200 quickly to acknowledge
+        email_address = pubsub_data.get("emailAddress", "?")
+        history_id    = pubsub_data.get("historyId", "?")
+
+        logger.info(f"📬 Gmail webhook | pubsubId={pubsub_id} | email={email_address} | historyId={history_id}")
+
+        # --- Idempotency check ---
+        with _seen_lock:
+            if pubsub_id and pubsub_id in _seen_pubsub_ids:
+                logger.info(f"   ⏭️  Duplicate pubsubId {pubsub_id} — skipping")
+                return {"status": "acknowledged"}
+            if pubsub_id:
+                _seen_pubsub_ids.add(pubsub_id)
+                # Keep the set bounded (last 500 IDs is more than enough)
+                if len(_seen_pubsub_ids) > 500:
+                    _seen_pubsub_ids.pop()
+
+        # Hand off to background task and return 200 immediately
+        background_tasks.add_task(process_gmail_notification, pubsub_data)
         return {"status": "acknowledged"}
 
     except Exception as e:
-        logger.error(f"❌ Gmail webhook error: {e}")
-        import traceback
-        logger.error(traceback.format_exc())
-        # Still return 200 to prevent Pub/Sub retries
-        return {"status": "error", "message": str(e)}
+        logger.error(f"❌ Gmail webhook parse error: {e}", exc_info=True)
+        # Still return 200 — a non-200 triggers unlimited Pub/Sub retries
+        return {"status": "error", "detail": str(e)}
 
 
 async def process_gmail_notification(pubsub_data: dict):
     """
-    Background task to process Gmail notification.
+    Background task: fetch new emails → run agent → send reply.
 
-    1. Fetch new emails via Gmail API
-    2. Create/find customer in CRM
-    3. Create conversation and ticket
-    4. Process through agent
-    5. Send reply via Gmail
+    Steps
+    -----
+    1. Ask Gmail API for messages added since last historyId
+    2. Skip emails that are SENT by us or FROM our own address
+    3. Upsert customer record in PostgreSQL
+    4. Create conversation + log inbound message
+    5. Run TaskVault agent
+    6. Log outbound message + send Gmail reply
+    7. Mark original as read, apply "TaskVault/Processed" label
     """
     try:
-        handler = get_gmail_handler()
-
-        # Get new messages
+        handler  = get_gmail_handler()
         messages = await handler.process_pubsub_notification(pubsub_data)
 
+        if not messages:
+            logger.info("   📭 No new inbound emails to process")
+            return
+
         for email_msg in messages:
-            logger.info(f"📧 Processing email from: {email_msg['customer_email']}")
-            logger.info(f"   Subject: {email_msg['subject']}")
+            sender = email_msg["customer_email"].lower()
 
-            # 1. Get or create customer
+            # --- Loop guard: never reply to our own outbound messages ---
+            if sender == OWN_EMAIL:
+                logger.info(f"   🔁 Skipping email from self ({sender})")
+                continue
+
+            logger.info(f"📧 Processing | from={sender} | subject={email_msg['subject']!r}")
+
+            # 1. Customer
             customer_id = await get_or_create_customer(
-                name=email_msg.get('customer_name'),
-                email=email_msg['customer_email']
+                name=email_msg.get("customer_name"),
+                email=sender,
             )
-            logger.info(f"   Customer ID: {customer_id}")
+            logger.info(f"   👤 Customer ID: {customer_id}")
 
-            # 2. Start conversation
+            # 2. Conversation
             conversation_id = await start_conversation(customer_id, "email")
-            logger.info(f"   Conversation ID: {conversation_id}")
+            logger.info(f"   💬 Conversation ID: {conversation_id}")
 
-            # 3. Log inbound message
+            # 3. Log inbound
             await log_message(
                 conversation_id=conversation_id,
                 channel="email",
                 direction="inbound",
                 role="customer",
-                content=email_msg['content']
+                content=email_msg["content"],
             )
 
-            # 4. Process through agent
-            # Combine subject and content for context
+            # 4. Agent
             full_message = f"Subject: {email_msg['subject']}\n\n{email_msg['content']}"
-
             agent_response = await process_customer_message(
                 customer_id=customer_id,
                 conversation_id=conversation_id,
                 channel="email",
-                message=full_message
+                message=full_message,
             )
-            logger.info(f"   Agent response generated ({len(agent_response)} chars)")
+            logger.info(f"   🤖 Agent response ready ({len(agent_response)} chars)")
 
-            # 5. Log outbound message
+            # 5. Log outbound
             await log_message(
                 conversation_id=conversation_id,
                 channel="email",
                 direction="outbound",
                 role="agent",
-                content=agent_response
+                content=agent_response,
             )
 
-            # 6. Send reply via Gmail
-            reply_result = await handler.send_reply(
-                to_email=email_msg['customer_email'],
-                subject=email_msg['subject'],
+            # 6. Send reply
+            reply = await handler.send_reply(
+                to_email=sender,
+                subject=email_msg["subject"],
                 body=agent_response,
-                thread_id=email_msg.get('thread_id'),
-                in_reply_to=email_msg.get('metadata', {}).get('headers', {}).get('message-id')
+                thread_id=email_msg.get("thread_id"),
+                in_reply_to=email_msg.get("metadata", {}).get("headers", {}).get("message-id"),
             )
-            logger.info(f"   Reply sent: {reply_result['delivery_status']}")
+            logger.info(f"   ✉️  Reply status: {reply['delivery_status']}")
 
-            # 7. Mark original as read and add label
-            await handler.mark_as_read(email_msg['channel_message_id'])
-            await handler.add_label(email_msg['channel_message_id'], "TaskVault/Processed")
+            # 7. Housekeeping
+            await handler.mark_as_read(email_msg["channel_message_id"])
+            await handler.add_label(email_msg["channel_message_id"], "TaskVault/Processed")
+            logger.info(f"   ✅ Done — email labelled & marked as read")
 
     except Exception as e:
-        logger.error(f"❌ Error processing Gmail notification: {e}")
-        import traceback
-        logger.error(traceback.format_exc())
+        logger.error(f"❌ process_gmail_notification failed: {e}", exc_info=True)
 
 
-# --- Web Form Webhook ---
+# ---------------------------------------------------------------------------
+# Web-form webhook
+# ---------------------------------------------------------------------------
 
 @router.post("/web-form")
 async def web_form_webhook(submission: WebFormSubmission, background_tasks: BackgroundTasks):
     """
-    Web support form submission endpoint.
+    Web support form submission.
 
-    Processes form submissions and triggers agent response.
-    Response is sent via email to the customer.
+    Returns a ticket reference immediately; processes in the background.
     """
-    try:
-        logger.info(f"🌐 Web form submission received")
-        logger.info(f"   From: {submission.name} <{submission.email}>")
-        logger.info(f"   Subject: {submission.subject}")
-
-        # Process in background, return ticket ID immediately
-        # Generate a temporary ticket reference
-        ticket_ref = f"WEB-{datetime.utcnow().strftime('%Y%m%d%H%M%S')}"
-
-        background_tasks.add_task(process_web_form, submission, ticket_ref)
-
-        return {
-            "status": "received",
-            "ticket_reference": ticket_ref,
-            "message": f"Thank you, {submission.name}! We've received your request and will respond to {submission.email} shortly."
-        }
-
-    except Exception as e:
-        logger.error(f"❌ Web form error: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+    logger.info(f"🌐 Web form | from={submission.name} <{submission.email}> | subject={submission.subject!r}")
+    ticket_ref = f"WEB-{datetime.utcnow().strftime('%Y%m%d%H%M%S')}"
+    background_tasks.add_task(process_web_form, submission, ticket_ref)
+    return {
+        "status": "received",
+        "ticket_reference": ticket_ref,
+        "message": (
+            f"Thank you, {submission.name}! "
+            f"We've received your request and will respond to {submission.email} shortly."
+        ),
+    }
 
 
 async def process_web_form(submission: WebFormSubmission, ticket_ref: str):
-    """
-    Background task to process web form submission.
-    """
+    """Background task for web-form submissions."""
     try:
-        # 1. Get or create customer
         customer_id = await get_or_create_customer(
             name=submission.name,
             email=submission.email,
-            phone=submission.phone
+            phone=submission.phone,
         )
-        logger.info(f"   Customer ID: {customer_id}")
+        logger.info(f"   👤 Customer ID: {customer_id}")
 
-        # 2. Start conversation
         conversation_id = await start_conversation(customer_id, "web_form")
-        logger.info(f"   Conversation ID: {conversation_id}")
+        logger.info(f"   💬 Conversation ID: {conversation_id}")
 
-        # 3. Log inbound message
         full_message = f"Subject: {submission.subject}\n\n{submission.message}"
         await log_message(
             conversation_id=conversation_id,
             channel="web_form",
             direction="inbound",
             role="customer",
-            content=full_message
+            content=full_message,
         )
 
-        # 4. Process through agent
         agent_response = await process_customer_message(
             customer_id=customer_id,
             conversation_id=conversation_id,
             channel="web_form",
-            message=full_message
+            message=full_message,
         )
-        logger.info(f"   Agent response generated ({len(agent_response)} chars)")
+        logger.info(f"   🤖 Agent response ready ({len(agent_response)} chars)")
 
-        # 5. Log outbound message
         await log_message(
             conversation_id=conversation_id,
             channel="web_form",
             direction="outbound",
             role="agent",
-            content=agent_response
+            content=agent_response,
         )
 
-        # 6. Send response via Gmail
         try:
             handler = get_gmail_handler()
             await handler.send_reply(
                 to_email=submission.email,
                 subject=f"Re: {submission.subject} [{ticket_ref}]",
-                body=agent_response
+                body=agent_response,
             )
-            logger.info(f"   Email response sent to {submission.email}")
-        except Exception as email_error:
-            logger.error(f"   Failed to send email response: {email_error}")
-            # TODO: Queue for retry or notify team
+            logger.info(f"   ✉️  Email response sent to {submission.email}")
+        except Exception as mail_err:
+            logger.error(f"   ❌ Failed to send email response: {mail_err}")
 
     except Exception as e:
-        logger.error(f"❌ Error processing web form: {e}")
-        import traceback
-        logger.error(traceback.format_exc())
+        logger.error(f"❌ process_web_form failed: {e}", exc_info=True)
 
 
-# --- WhatsApp Webhook (Placeholder) ---
+# ---------------------------------------------------------------------------
+# WhatsApp webhook (placeholder)
+# ---------------------------------------------------------------------------
 
 @router.post("/whatsapp")
 async def whatsapp_webhook(request: Request):
-    """
-    WhatsApp webhook endpoint (via Twilio).
-
-    TODO: Implement Twilio WhatsApp integration.
-    """
-    logger.info("📱 WhatsApp webhook received (not yet implemented)")
+    """WhatsApp Twilio webhook (to be implemented)."""
+    logger.info("📱 WhatsApp webhook received — not yet implemented")
     return {"status": "acknowledged"}
 
 
 @router.get("/whatsapp")
 async def whatsapp_verify(request: Request):
-    """
-    WhatsApp webhook verification (for Twilio setup).
-    """
-    # Twilio doesn't require verification like Meta
+    """WhatsApp webhook verification."""
     return {"status": "ok"}

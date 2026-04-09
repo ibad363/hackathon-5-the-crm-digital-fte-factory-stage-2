@@ -103,6 +103,14 @@ CREATE TABLE IF NOT EXISTS agent_metrics (
     recorded_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
 );
 
+-- Integration state (persists Gmail historyId across restarts)
+CREATE TABLE IF NOT EXISTS integration_state (
+    id          UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    name        TEXT UNIQUE NOT NULL,
+    last_hid    BIGINT,
+    updated_at  TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+);
+
 -- Indexes for performance
 CREATE INDEX IF NOT EXISTS idx_customers_email ON customers(email);
 CREATE INDEX IF NOT EXISTS idx_customer_identifiers_value ON customer_identifiers(identifier_value);
