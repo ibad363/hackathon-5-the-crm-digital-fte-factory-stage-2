@@ -80,6 +80,7 @@ class GmailHandler:
         self.credentials = get_gmail_credentials()
         self.service = build('gmail', 'v1', credentials=self.credentials)
         self._last_history_id: Optional[int] = None
+        self._processed_msg_ids: set[str] = set()
 
         # Load persisted state in the background
         loop = asyncio.get_event_loop()
@@ -178,6 +179,16 @@ class GmailHandler:
                 for msg_added in record.get('messagesAdded', []):
                     msg_meta = msg_added['message']
                     msg_id = msg_meta['id']
+
+                    # 0. Deduplication: skip if message already processed in this session
+                    if msg_id in self._processed_msg_ids:
+                        continue
+
+                    self._processed_msg_ids.add(msg_id)
+                    # Memory management: reset after 1000 IDs to avoid unbounded growth
+                    if len(self._processed_msg_ids) > 1000:
+                        self._processed_msg_ids.clear()
+                        self._processed_msg_ids.add(msg_id)
 
                     # 1. Skip messages we sent
                     if 'SENT' in msg_meta.get('labelIds', []):

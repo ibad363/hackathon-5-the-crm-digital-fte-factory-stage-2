@@ -3,6 +3,7 @@ import os
 import asyncpg
 import logging
 import json
+import asyncio
 from typing import List, Optional, Dict, Any
 from sentence_transformers import SentenceTransformer
 from dotenv import load_dotenv
@@ -18,18 +19,25 @@ embedding_model = SentenceTransformer('sentence-transformers/all-MiniLM-L6-v2')
 # --- Singleton Connection Pool ---
 # One pool shared across the entire app lifetime — never create a new pool per query.
 _pool: Optional[asyncpg.Pool] = None
+_pool_lock = asyncio.Lock()
 
 
 async def get_db_pool() -> asyncpg.Pool:
-    """Return the shared DB pool, creating it once if needed."""
+    """Return the shared DB pool, creating it once safely if needed."""
     global _pool
-    if _pool is None:
-        _pool = await asyncpg.create_pool(
-            os.getenv("DATABASE_URL"),
-            min_size=2,   # Keep at least 2 connections ready
-            max_size=10,  # Never exceed 10 connections
-        )
-        logger.info("✅ Database pool created (min=2, max=10)")
+    # If it exists, return immediately (fast path)
+    if _pool is not None:
+        return _pool
+
+    # If not, acquire lock and create it (safe path)
+    async with _pool_lock:
+        if _pool is None:
+            _pool = await asyncpg.create_pool(
+                os.getenv("DATABASE_URL"),
+                min_size=2,   # Keep at least 2 connections ready
+                max_size=10,  # Never exceed 10 connections
+            )
+            logger.info("✅ Database pool created (min=2, max=10)")
     return _pool
 
 
