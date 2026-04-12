@@ -86,7 +86,8 @@ async def process_customer_message(
             taskvault_agent,
             enriched_input,
             session=session,
-            run_config=config
+            run_config=config,
+            max_turns=20
         )
 
         # Debug: Print what happened

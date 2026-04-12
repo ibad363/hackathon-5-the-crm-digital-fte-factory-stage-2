@@ -5,7 +5,6 @@ Webhook Endpoints for TaskVault CRM
 Handles incoming webhooks from:
 - Gmail (via Google Pub/Sub)
 - WhatsApp (via Twilio)
-- Web Support Form
 """
 
 import os
@@ -49,19 +48,6 @@ _seen_lock = threading.Lock()
 
 # Gmail address that belongs to the AI — skip emails we sent ourselves
 OWN_EMAIL: str = os.getenv("GMAIL_ADDRESS", "ibad0352@gmail.com").lower()
-
-
-# ---------------------------------------------------------------------------
-# Pydantic models
-# ---------------------------------------------------------------------------
-
-class WebFormSubmission(BaseModel):
-    """Web support form submission."""
-    name: str
-    email: EmailStr
-    subject: str
-    message: str
-    phone: Optional[str] = None
 
 
 # ---------------------------------------------------------------------------
@@ -215,83 +201,6 @@ async def process_gmail_notification(pubsub_data: dict):
 
     except Exception as e:
         logger.error(f"❌ process_gmail_notification failed: {e}", exc_info=True)
-
-
-# ---------------------------------------------------------------------------
-# Web-form webhook
-# ---------------------------------------------------------------------------
-
-@router.post("/web-form")
-async def web_form_webhook(submission: WebFormSubmission, background_tasks: BackgroundTasks):
-    """
-    Web support form submission.
-
-    Returns a ticket reference immediately; processes in the background.
-    """
-    logger.info(f"🌐 Web form | from={submission.name} <{submission.email}> | subject={submission.subject!r}")
-    ticket_ref = f"WEB-{datetime.utcnow().strftime('%Y%m%d%H%M%S')}"
-    background_tasks.add_task(process_web_form, submission, ticket_ref)
-    return {
-        "status": "received",
-        "ticket_reference": ticket_ref,
-        "message": (
-            f"Thank you, {submission.name}! "
-            f"We've received your request and will respond to {submission.email} shortly."
-        ),
-    }
-
-
-async def process_web_form(submission: WebFormSubmission, ticket_ref: str):
-    """Background task for web-form submissions."""
-    try:
-        customer_id = await get_or_create_customer(
-            name=submission.name,
-            email=submission.email,
-            phone=submission.phone,
-        )
-        logger.info(f"   👤 Customer ID: {customer_id}")
-
-        conversation_id = await start_conversation(customer_id, "web_form")
-        logger.info(f"   💬 Conversation ID: {conversation_id}")
-
-        full_message = f"Subject: {submission.subject}\n\n{submission.message}"
-        await log_message(
-            conversation_id=conversation_id,
-            channel="web_form",
-            direction="inbound",
-            role="customer",
-            content=full_message,
-        )
-
-        agent_response = await process_customer_message(
-            customer_id=customer_id,
-            conversation_id=conversation_id,
-            channel="web_form",
-            message=full_message,
-        )
-        logger.info(f"   🤖 Agent response ready ({len(agent_response)} chars)")
-
-        await log_message(
-            conversation_id=conversation_id,
-            channel="web_form",
-            direction="outbound",
-            role="agent",
-            content=agent_response,
-        )
-
-        try:
-            handler = get_gmail_handler()
-            await handler.send_reply(
-                to_email=submission.email,
-                subject=f"Re: {submission.subject} [{ticket_ref}]",
-                body=agent_response,
-            )
-            logger.info(f"   ✉️  Email response sent to {submission.email}")
-        except Exception as mail_err:
-            logger.error(f"   ❌ Failed to send email response: {mail_err}")
-
-    except Exception as e:
-        logger.error(f"❌ process_web_form failed: {e}", exc_info=True)
 
 
 # ---------------------------------------------------------------------------

@@ -14,7 +14,8 @@ load_dotenv()
 logger = logging.getLogger(__name__)
 
 # Initialize local embedding model (Free & Local)
-embedding_model = SentenceTransformer('sentence-transformers/all-MiniLM-L6-v2')
+# Set local_files_only=True to prevent crashes when internet is unstable
+embedding_model = SentenceTransformer('sentence-transformers/all-MiniLM-L6-v2', local_files_only=True)
 
 # --- Singleton Connection Pool ---
 # One pool shared across the entire app lifetime — never create a new pool per query.
@@ -53,7 +54,8 @@ async def close_db_pool():
 async def generate_embedding(text: str) -> List[float]:
     """Generate a vector embedding using a local SentenceTransformer model."""
     try:
-        embedding = embedding_model.encode(text.replace("\n", " "))
+        # Normalize embeddings to length 1 for accurate pgvector cosine similarity (<=>)
+        embedding = embedding_model.encode(text.replace("\n", " "), normalize_embeddings=True)
         return embedding.tolist()
     except Exception as e:
         logger.error(f"Local embedding generation failed: {e}")
@@ -162,10 +164,13 @@ async def search_knowledge_base(query: str, limit: int = 3) -> List[Dict[str, An
     pool = await get_db_pool()
     async with pool.acquire() as conn:
         embedding_str = str(query_embedding)
+        # Using inner product (<#>) which is equivalent to cosine similarity for normalized vectors
+        # Since pgvector <#> returns negative inner product, we use (embedding <#> $1) * -1 for similarity
         results = await conn.fetch("""
-            SELECT title, content, category, 1 - (embedding <=> $1) as similarity
+            SELECT title, content, category,
+            (embedding <#> $1) * -1 as similarity
             FROM knowledge_base
-            ORDER BY embedding <=> $1
+            ORDER BY embedding <#> $1
             LIMIT $2
         """, embedding_str, limit)
         return [dict(r) for r in results]

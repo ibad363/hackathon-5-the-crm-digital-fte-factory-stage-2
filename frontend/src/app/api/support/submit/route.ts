@@ -9,13 +9,6 @@ interface SupportFormData {
   message: string;
 }
 
-// Generate a unique ticket ID
-function generateTicketId(): string {
-  const timestamp = Date.now().toString(36).toUpperCase();
-  const random = Math.random().toString(36).substring(2, 6).toUpperCase();
-  return `TKT-${timestamp}-${random}`;
-}
-
 export async function POST(request: NextRequest) {
   try {
     const body: SupportFormData = await request.json();
@@ -40,27 +33,44 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    // Generate ticket ID
-    const ticketId = generateTicketId();
+    // Forward request to FastAPI backend
+    const backendUrl = process.env.BACKEND_URL || 'http://127.0.0.1:8000';
 
-    // TODO: In production, this would:
-    // 1. Store the ticket in PostgreSQL database
-    // 2. Publish to Kafka topic (fte.tickets.incoming)
-    // 3. Trigger the AI agent for processing
+    console.log(`Forwarding request to backend at ${backendUrl}/api/support/submit`);
 
-    console.log('Support ticket created:', {
-      ticket_id: ticketId,
-      ...body,
-      created_at: new Date().toISOString(),
-      channel: 'web_form'
+    const backendResponse = await fetch(`${backendUrl}/api/support/submit`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        name: body.name,
+        email: body.email,
+        subject: body.subject,
+        message: body.message,
+        category: body.category,
+        priority: body.priority
+      }),
     });
 
-    // Return success response with ticket ID
+    if (!backendResponse.ok) {
+      const errorData = await backendResponse.text();
+      console.error('Backend returned error:', backendResponse.status, errorData);
+      throw new Error(`Backend error: ${backendResponse.status}`);
+    }
+
+    const backendData = await backendResponse.json();
+
+    console.log('Support ticket created on backend:', {
+      ticket_id: backendData.ticket_id,
+    });
+
+    // Return success response with ticket ID from backend
     return NextResponse.json({
       success: true,
-      ticket_id: ticketId,
-      message: 'Support request submitted successfully',
-      estimated_response_time: '5 minutes'
+      ticket_id: backendData.ticket_id,
+      message: backendData.message,
+      estimated_response_time: backendData.estimated_response_time
     });
 
   } catch (error) {

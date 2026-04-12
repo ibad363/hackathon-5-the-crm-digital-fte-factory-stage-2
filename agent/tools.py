@@ -64,22 +64,22 @@ async def search_knowledge_base(input: KnowledgeSearchInput) -> str:
             embedding = await generate_embedding(input.query)
             embedding_str = str(embedding)
 
-            # Query with vector similarity
+            # Query with vector similarity using inner product (<#>)
             if input.category:
                 results = await conn.fetch("""
                     SELECT title, content, category,
-                    1 - (embedding <=> $1) as similarity
+                    (embedding <#> $1) * -1 as similarity
                     FROM knowledge_base
                     WHERE category = $2
-                    ORDER BY embedding <=> $1
+                    ORDER BY embedding <#> $1
                     LIMIT $3
                 """, embedding_str, input.category, input.max_results)
             else:
                 results = await conn.fetch("""
                     SELECT title, content, category,
-                    1 - (embedding <=> $1) as similarity
+                    (embedding <#> $1) * -1 as similarity
                     FROM knowledge_base
-                    ORDER BY embedding <=> $1
+                    ORDER BY embedding <#> $1
                     LIMIT $2
                 """, embedding_str, input.max_results)
 

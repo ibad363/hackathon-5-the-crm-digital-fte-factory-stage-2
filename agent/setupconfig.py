@@ -23,27 +23,28 @@ if not NINEROUTER_API_KEY:
 
 # GEMINI
 
-external_client = AsyncOpenAI(
-    api_key=GEMINI_API_KEY,
-    base_url="https://generativelanguage.googleapis.com/v1beta",
-)
-
-model = OpenAIChatCompletionsModel(
-    model="gemini-2.5-flash",
-    openai_client=external_client,
-)
-
-# NINEROUTER
-
 # external_client = AsyncOpenAI(
-#     api_key=NINEROUTER_API_KEY,
-#     base_url="http://localhost:20128/v1",
+#     api_key=GEMINI_API_KEY,
+#     base_url="https://generativelanguage.googleapis.com/v1beta",
 # )
 
 # model = OpenAIChatCompletionsModel(
-#     model="antigravity",
+#     # model="gemini-2.5-flash",
+#     model="gemini-3.1-flash-lite-preview",
 #     openai_client=external_client,
 # )
+
+# NINEROUTER
+
+external_client = AsyncOpenAI(
+    api_key=NINEROUTER_API_KEY,
+    base_url="http://localhost:20128/v1",
+)
+
+model = OpenAIChatCompletionsModel(
+    model="qw/qwen3-coder-plus",
+    openai_client=external_client,
+)
 
 # OPENROUTER
 
@@ -54,7 +55,7 @@ model = OpenAIChatCompletionsModel(
 
 # model = OpenAIChatCompletionsModel(
 #     # model="qwen/qwen3.6-plus:free",
-#     model="nvidia/nemotron-3-super-120b-a12b:free",
+#     model="openai/gpt-oss-20b:free",
 #     openai_client=external_client,
 # )
 

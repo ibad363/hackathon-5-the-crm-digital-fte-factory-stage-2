@@ -18,6 +18,7 @@ from fastapi.middleware.cors import CORSMiddleware
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from api.webhooks import router as webhooks_router
+from channels.web_form_handler import router as web_form_router
 
 # Configure logging
 logging.basicConfig(
@@ -34,7 +35,7 @@ async def lifespan(app: FastAPI):
     logger.info("🚀 TaskVault CRM API starting up...")
     logger.info("📧 Gmail webhook ready at: /api/webhooks/gmail")
     logger.info("📱 WhatsApp webhook ready at: /api/webhooks/whatsapp")
-    logger.info("🌐 Web form endpoint ready at: /api/webhooks/web-form")
+    logger.info("🌐 Web form endpoint ready at: /api/support/submit")
 
     yield
 
@@ -61,6 +62,7 @@ app.add_middleware(
 
 # Include routers
 app.include_router(webhooks_router, prefix="/api/webhooks", tags=["Webhooks"])
+app.include_router(web_form_router, prefix="/api")
 
 
 # Health check endpoint

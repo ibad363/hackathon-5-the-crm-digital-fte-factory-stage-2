@@ -2,45 +2,66 @@ import SupportForm from "@/components/SupportForm";
 
 export default function Home() {
   return (
-    <div className="min-h-screen bg-gradient-to-br from-blue-50 to-indigo-100 py-12 px-4 sm:px-6 lg:px-8">
-      <div className="max-w-4xl mx-auto">
-        {/* Header */}
-        <div className="text-center mb-10">
-          <h1 className="text-4xl font-bold text-gray-900 mb-3">
-            Customer Support
+    <div className="flex flex-col w-full">
+      {/* Hero Section */}
+      <section className="pt-16 pb-12 px-4 sm:px-6 lg:px-8">
+        <div className="max-w-4xl mx-auto text-center">
+          <h1 className="text-5xl md:text-6xl font-extrabold tracking-tight text-slate-900 dark:text-white mb-6">
+            Help that never <span className="text-indigo-600 dark:text-indigo-400">sleeps.</span>
           </h1>
-          <p className="text-lg text-gray-600 max-w-2xl mx-auto">
-            Need help? Our AI-powered support team is available 24/7 to assist you with any questions or issues.
+          <p className="text-xl text-slate-600 dark:text-slate-400 max-w-2xl mx-auto leading-relaxed">
+            Our autonomous AI agents are ready to resolve your issues instantly, 24/7.
+            Experience the future of customer success today.
           </p>
-        </div>
 
-        {/* Support Form */}
-        <SupportForm apiEndpoint="/api/support/submit" />
-
-        {/* Footer Info */}
-        <div className="mt-10 text-center">
-          <div className="flex justify-center space-x-8 text-sm text-gray-500">
-            <div className="flex items-center">
-              <svg className="w-5 h-5 mr-2 text-green-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z" />
-              </svg>
-              Average response: 5 minutes
+          {/* Quick Stats */}
+          <div className="mt-12 grid grid-cols-1 sm:grid-cols-3 gap-6 max-w-3xl mx-auto">
+            <div className="glass-card p-6">
+              <div className="text-2xl font-bold text-indigo-600 dark:text-indigo-400 mb-1">5m</div>
+              <div className="text-xs font-semibold text-slate-500 uppercase tracking-wider">Avg Response</div>
             </div>
-            <div className="flex items-center">
-              <svg className="w-5 h-5 mr-2 text-blue-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12l2 2 4-4m5.618-4.016A11.955 11.955 0 0112 2.944a11.955 11.955 0 01-8.618 3.04A12.02 12.02 0 003 9c0 5.591 3.824 10.29 9 11.622 5.176-1.332 9-6.03 9-11.622 0-1.042-.133-2.052-.382-3.016z" />
-              </svg>
-              Secure & Private
+            <div className="glass-card p-6">
+              <div className="text-2xl font-bold text-indigo-600 dark:text-indigo-400 mb-1">98%</div>
+              <div className="text-xs font-semibold text-slate-500 uppercase tracking-wider">Auto-Resolved</div>
             </div>
-            <div className="flex items-center">
-              <svg className="w-5 h-5 mr-2 text-purple-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 10V3L4 14h7v7l9-11h-7z" />
-              </svg>
-              AI-Powered
+            <div className="glass-card p-6">
+              <div className="text-2xl font-bold text-indigo-600 dark:text-indigo-400 mb-1">24/7</div>
+              <div className="text-xs font-semibold text-slate-500 uppercase tracking-wider">Availability</div>
             </div>
           </div>
         </div>
-      </div>
+      </section>
+
+      {/* Main Support Portal */}
+      <section className="py-12 px-4 sm:px-6 lg:px-8 bg-slate-100/50 dark:bg-slate-900/20 border-y border-slate-200/50 dark:border-slate-800/50">
+        <div className="max-w-4xl mx-auto">
+          <SupportForm apiEndpoint="/api/support/submit" />
+        </div>
+      </section>
+
+      {/* How it Works */}
+      <section className="py-20 px-4 sm:px-6 lg:px-8">
+        <div className="max-w-4xl mx-auto">
+          <h2 className="text-3xl font-bold text-center text-slate-900 dark:text-white mb-12">How AI Support Works</h2>
+          <div className="grid grid-cols-1 md:grid-cols-3 gap-12">
+            <div className="flex flex-col items-center text-center">
+              <div className="w-12 h-12 bg-indigo-100 dark:bg-indigo-900/30 rounded-full flex items-center justify-center text-indigo-600 dark:text-indigo-400 mb-4 font-bold">1</div>
+              <h3 className="font-bold text-lg mb-2">Instant Intake</h3>
+              <p className="text-slate-600 dark:text-slate-400 text-sm">Submit your request via web, email, or WhatsApp. Our system ingests it immediately.</p>
+            </div>
+            <div className="flex flex-col items-center text-center">
+              <div className="w-12 h-12 bg-violet-100 dark:bg-violet-900/30 rounded-full flex items-center justify-center text-violet-600 dark:text-violet-400 mb-4 font-bold">2</div>
+              <h3 className="font-bold text-lg mb-2">Deep Analysis</h3>
+              <p className="text-slate-600 dark:text-slate-400 text-sm">Our AI analyzes your issue against our vast knowledge base and your history.</p>
+            </div>
+            <div className="flex flex-col items-center text-center">
+              <div className="w-12 h-12 bg-blue-100 dark:bg-blue-900/30 rounded-full flex items-center justify-center text-blue-600 dark:text-blue-400 mb-4 font-bold">3</div>
+              <h3 className="font-bold text-lg mb-2">Expert Resolution</h3>
+              <p className="text-slate-600 dark:text-slate-400 text-sm">You get a tailored response or solution in minutes, or it's escalated to a human expert.</p>
+            </div>
+          </div>
+        </div>
+      </section>
     </div>
   );
 }
