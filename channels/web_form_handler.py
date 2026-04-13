@@ -9,6 +9,8 @@ from database.queries import (
     get_or_create_customer,
     start_conversation,
     log_message,
+    get_db_pool,
+    create_ticket,
 )
 from agent.customer_success_agent import process_customer_message
 from channels.gmail_handler import get_gmail_handler
@@ -66,7 +68,17 @@ async def process_web_form_background(submission: SupportFormSubmission, ticket_
         conversation_id = await start_conversation(customer_id, "web_form")
         logger.info(f"   💬 Conversation ID: {conversation_id}")
 
-        # 3. Log the inbound message
+        # 3. Create ticket immediately and store the WEB- ref so it can be looked up
+        pool = await get_db_pool()
+        async with pool.acquire() as conn:
+            await conn.execute("""
+                INSERT INTO tickets (conversation_id, customer_id, source_channel, category, priority, external_ref)
+                VALUES ($1, $2, 'web_form', $3, $4, $5)
+            """, conversation_id, customer_id,
+                submission.category, submission.priority or 'medium', ticket_ref)
+        logger.info(f"   🎫 Ticket created with ref: {ticket_ref}")
+
+        # 4. Log the inbound message
         enhanced_subject = f"[{submission.category.upper()}] {submission.subject}"
         full_message = f"Subject: {enhanced_subject}\n\n{submission.message}"
 
@@ -78,7 +90,7 @@ async def process_web_form_background(submission: SupportFormSubmission, ticket_
             content=full_message,
         )
 
-        # 4. Run the AI agent
+        # 5. Run the AI agent
         agent_response = await process_customer_message(
             customer_id=customer_id,
             conversation_id=conversation_id,
@@ -87,7 +99,7 @@ async def process_web_form_background(submission: SupportFormSubmission, ticket_
         )
         logger.info(f"   🤖 Agent response ready ({len(agent_response)} chars)")
 
-        # 5. Log the outbound message
+        # 6. Log the outbound message
         await log_message(
             conversation_id=conversation_id,
             channel="web_form",
@@ -96,7 +108,15 @@ async def process_web_form_background(submission: SupportFormSubmission, ticket_
             content=agent_response,
         )
 
-        # 6. Send the email reply via Gmail API
+        # 7. Update ticket status to resolved if it wasn't escalated
+        async with pool.acquire() as conn:
+            await conn.execute("""
+                UPDATE tickets
+                SET status = 'resolved', resolved_at = NOW()
+                WHERE external_ref = $1 AND status = 'open'
+            """, ticket_ref)
+
+        # 8. Send the email reply via Gmail API
         try:
             handler = get_gmail_handler()
             await handler.send_reply(
@@ -144,14 +164,32 @@ async def get_ticket_status(ticket_id: str):
 
     pool = await get_db_pool()
     async with pool.acquire() as conn:
-        # Simplified for now just to return basic DB ticket check
+        # Fetch ticket details
         ticket = await conn.fetchrow("""
-            SELECT id, status, created_at, category, priority
+            SELECT id, status, created_at, category, priority, conversation_id, external_ref
             FROM tickets
-            WHERE id::text = $1 OR conversation_id::text = $1
+            WHERE id::text = $1 OR conversation_id::text = $1 OR external_ref = $1
         """, ticket_id)
 
         if not ticket:
             raise HTTPException(status_code=404, detail="Ticket not found")
 
-        return dict(ticket)
+        # Use external_ref as ticket_id for the UI if it exists
+        display_id = ticket['external_ref'] or str(ticket['id'])
+
+        # Fetch conversation messages to show progress
+        messages = await conn.fetch("""
+            SELECT role, content, created_at, direction
+            FROM messages
+            WHERE conversation_id = $1
+            ORDER BY created_at ASC
+        """, ticket['conversation_id'])
+
+        return {
+            "ticket_id": display_id,
+            "status": ticket['status'],
+            "created_at": ticket['created_at'],
+            "category": ticket['category'],
+            "priority": ticket['priority'],
+            "messages": [dict(m) for m in messages]
+        }

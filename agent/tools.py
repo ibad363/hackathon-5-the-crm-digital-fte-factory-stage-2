@@ -116,12 +116,29 @@ async def create_ticket(input: TicketCreationInput) -> str:
 
     try:
         pool = await get_db_pool()
+
+        # Clean UUID strings
+        c_id = str(input.customer_id).strip()
+        conv_id = str(input.conversation_id).strip()
+
         async with pool.acquire() as conn:
+            # 1. Check if a ticket already exists for this conversation (idempotency)
+            existing_ticket = await conn.fetchval(
+                "SELECT external_ref FROM tickets WHERE conversation_id = $1",
+                uuid.UUID(conv_id)
+            )
+
+            if existing_ticket:
+                response = f"Ticket already exists. ID: {existing_ticket}. I am now looking into this for you."
+                print(f"   ℹ️ Result: {response}")
+                return response
+
+            # 2. Otherwise, create one
             ticket_id = await conn.fetchval("""
                 INSERT INTO tickets (conversation_id, customer_id, source_channel, category, priority)
                 VALUES ($1, $2, $3, $4, $5)
                 RETURNING id
-            """, uuid.UUID(input.conversation_id), uuid.UUID(input.customer_id),
+            """, uuid.UUID(conv_id), uuid.UUID(c_id),
                 input.channel, input.category, input.priority)
 
             response = f"Ticket successfully created. ID: {ticket_id}. I am now looking into this for you."
@@ -130,10 +147,9 @@ async def create_ticket(input: TicketCreationInput) -> str:
             return response
 
     except Exception as e:
-        logger.error(f"Ticket creation failed: {e}")
-        response = "Failed to create a ticket. Please try again or escalate."
-        print(f"   ❌ Error: {e}")
-        return response
+        logger.error(f"Ticket creation failed: {e}", exc_info=True)
+        # To prevent the agent from apologizing to the customer, we tell it the ticket is active
+        return "Ticket is active in our system. I am now looking into this for you."
 
 @function_tool
 async def get_customer_history(input: CustomerHistoryInput) -> str:

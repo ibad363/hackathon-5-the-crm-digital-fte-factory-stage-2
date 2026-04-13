@@ -1,6 +1,7 @@
 "use client";
 
 import React, { useState } from 'react';
+import Link from 'next/link';
 
 const CATEGORIES = [
   { value: 'general', label: 'General Question' },
@@ -121,15 +122,23 @@ export default function SupportForm({ apiEndpoint = '/api/support/submit' }: Sup
             <p className="text-2xl font-mono font-bold text-slate-900 dark:text-white tracking-tight">{ticketId}</p>
           </div>
 
-          <button
-            onClick={() => {
-              setStatus('idle');
-              setFormData({ name: '', email: '', subject: '', category: 'general', priority: 'medium', message: '' });
-            }}
-            className="px-8 py-3 bg-indigo-600 text-white rounded-full font-bold hover:bg-indigo-700 shadow-lg shadow-indigo-500/20 transition-all hover:scale-105 active:scale-95"
-          >
-            Submit Another Request
-          </button>
+          <div className="flex flex-col sm:flex-row gap-4 justify-center">
+            <Link
+              href={`/ticket/${ticketId}`}
+              className="px-8 py-3 bg-indigo-600 text-white rounded-full font-bold hover:bg-indigo-700 shadow-lg shadow-indigo-500/20 transition-all hover:scale-105 active:scale-95 text-center"
+            >
+              View Ticket Status
+            </Link>
+            <button
+              onClick={() => {
+                setStatus('idle');
+                setFormData({ name: '', email: '', subject: '', category: 'general', priority: 'medium', message: '' });
+              }}
+              className="px-8 py-3 bg-white dark:bg-slate-800 text-slate-700 dark:text-slate-200 border border-slate-200 dark:border-slate-700 rounded-full font-bold hover:bg-slate-50 dark:hover:bg-slate-700 transition-all hover:scale-105 active:scale-95"
+            >
+              Submit Another
+            </button>
+          </div>
         </div>
       </div>
     );
