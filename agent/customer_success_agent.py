@@ -49,7 +49,7 @@ async def process_customer_message(
     conversation_id: str,
     channel: str,
     message: str,
-    db_path: str = "chat_history.db"
+    db_path: str = os.path.join(os.path.dirname(__file__), "chat_history.db")
 ) -> str:
     """
     Process an incoming message through the TaskVault Agent.
