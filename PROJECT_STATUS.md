@@ -52,6 +52,7 @@ The project evolves from a general prototype to a production-grade specialized a
    - **Frontend:** Completed React/Next.js frontend with Tailwind CSS. Features real-time validation and character counting.
    - **Ticket Tracking:** Built a dedicated **Ticket Status Portal** (`/ticket/[id]`) that allows users to track their conversation with the AI in real-time using a chat-bubble UI.
    - **Integration:** Successfully wired the Next.js API proxy to a dedicated FastAPI `web_form_handler.py`.
+   - **Race Condition Fix:** Moved ticket creation logic into the main request thread to ensure records exist in the database before the frontend redirects to the status portal, eliminating 404 errors.
    - **Real-time Updates:** Implemented auto-polling on the ticket status page to show AI responses as they are generated.
 
 ### 🚧 What is In Progress / Needs Debugging
@@ -76,6 +77,8 @@ This section documents the hurdles overcome during development to serve as a ref
 * **The Database Connection Crisis:** Initially, the code created a new connection pool for every query. When multiple webhooks hit simultaneously, it instantly crashed PostgreSQL with a `TooManyConnectionsError` (sorry, too many clients already). **Fix:** Implemented a global Singleton pool in `database/queries.py`.
 * **The "Infinite Logs" Webhook Flood:** Google Pub/Sub's history API is relentless. Because the `GmailHandler` kept losing its `_last_history_id` on server reloads, Google would flush the entire inbox history every time, resulting in endless logs of bounce messages and old emails. **Fix:** Created the `integration_state` table to persistently save the history ID to the database, added a 15-minute age cutoff, and explicitly filtered out `mailer-daemon` and `noreply` addresses.
 * **The Webhook Double-Slash Bug:** Pub/Sub was returning unlimited 404 errors. **Fix:** Removed a typo in the Google Cloud Console subscription URL (`//api/...` -> `/api/...`).
+* **The Web Form 404 Race Condition:** The frontend would occasionally hit a 404 when looking up a newly created ticket. **Fix:** Refactored the intake handler to create the ticket synchronously before returning the response, while keeping the heavy AI processing in the background.
+* **The Missing External Ref in AI Tools:** When the AI agent created a ticket (e.g. for email), it used a UUID which broke the status portal tracking. **Fix:** Updated the `create_ticket` tool to automatically generate and return human-readable channel-prefix IDs (e.g. `EMA-2026...`).
 * **The Vector Similarity Gap:** Semantic search was returning scores as low as 0.17 for exact matches. **Fix:** Normalized embeddings to length 1 and switched the `pgvector` operator from `<=>` (Cosine Distance) to `<#>` (Inner Product/Dot Product). Similarity scores improved to 0.80+.
 * **The Massive Doc Context Crash:** Searching the KB with unsplit documents caused the LLM to get lost in irrelevant noise or hit token limits. **Fix:** Implemented header-based markdown chunking in the seed script.
 * **The "Ticket Already Exists" AI Loop:** When a webhook created a ticket before the agent started, the agent's `create_ticket` tool would crash, causing the AI to apologize for "technical difficulties." **Fix:** Made the `create_ticket` tool idempotent by checking for existing `conversation_id` before inserting.

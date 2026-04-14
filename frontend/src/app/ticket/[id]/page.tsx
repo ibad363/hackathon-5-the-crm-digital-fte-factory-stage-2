@@ -124,7 +124,7 @@ export default function TicketStatusPage({ params }: { params: Promise<{ id: str
       </div>
 
       {/* Conversation History */}
-      <div className="bg-white dark:bg-slate-900 rounded-2xl shadow-sm border border-slate-200 dark:border-slate-800 flex flex-col min-h-[400px]">
+      <div className="bg-white dark:bg-slate-900 rounded-2xl shadow-sm border border-slate-200 dark:border-slate-800 flex flex-col min-h-100">
         <div className="p-4 border-b border-slate-100 dark:border-slate-800 flex items-center justify-between">
           <h2 className="font-bold text-slate-900 dark:text-white">Activity Log</h2>
           <button
@@ -167,7 +167,7 @@ export default function TicketStatusPage({ params }: { params: Promise<{ id: str
 
           {ticket.status === 'open' && (
             <div className="flex justify-start">
-              <div className="bg-slate-50 dark:bg-slate-800/30 border border-dashed border-slate-200 dark:border-slate-700 rounded-2xl p-4 flex items-center space-x-3 text-slate-500 animate-pulse w-full max-w-[200px]">
+              <div className="bg-slate-50 dark:bg-slate-800/30 border border-dashed border-slate-200 dark:border-slate-700 rounded-2xl p-4 flex items-center space-x-3 text-slate-500 animate-pulse w-full max-w-50">
                 <div className="flex space-x-1">
                   <div className="w-1.5 h-1.5 bg-slate-400 rounded-full animate-bounce"></div>
                   <div className="w-1.5 h-1.5 bg-slate-400 rounded-full animate-bounce [animation-delay:0.2s]"></div>

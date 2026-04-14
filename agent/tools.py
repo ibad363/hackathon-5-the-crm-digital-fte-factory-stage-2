@@ -120,30 +120,36 @@ async def create_ticket(input: TicketCreationInput) -> str:
         # Clean UUID strings
         c_id = str(input.customer_id).strip()
         conv_id = str(input.conversation_id).strip()
+        channel_code = input.channel[:3].upper() if input.channel else "GEN"
 
         async with pool.acquire() as conn:
             # 1. Check if a ticket already exists for this conversation (idempotency)
-            existing_ticket = await conn.fetchval(
-                "SELECT external_ref FROM tickets WHERE conversation_id = $1",
+            existing_ticket = await conn.fetchrow(
+                "SELECT external_ref, id FROM tickets WHERE conversation_id = $1",
                 uuid.UUID(conv_id)
             )
 
             if existing_ticket:
-                response = f"Ticket already exists. ID: {existing_ticket}. I am now looking into this for you."
+                display_id = existing_ticket['external_ref'] or str(existing_ticket['id'])
+                response = f"Ticket already exists. ID: {display_id}. I am now looking into this for you."
                 print(f"   ℹ️ Result: {response}")
                 return response
 
-            # 2. Otherwise, create one
+            # 2. Generate external_ref
+            from datetime import datetime
+            ticket_ref = f"{channel_code}-{datetime.utcnow().strftime('%Y%m%d%H%M%S')}"
+
+            # 3. Otherwise, create one
             ticket_id = await conn.fetchval("""
-                INSERT INTO tickets (conversation_id, customer_id, source_channel, category, priority)
-                VALUES ($1, $2, $3, $4, $5)
+                INSERT INTO tickets (conversation_id, customer_id, source_channel, category, priority, external_ref)
+                VALUES ($1, $2, $3, $4, $5, $6)
                 RETURNING id
             """, uuid.UUID(conv_id), uuid.UUID(c_id),
-                input.channel, input.category, input.priority)
+                input.channel, input.category, input.priority, ticket_ref)
 
-            response = f"Ticket successfully created. ID: {ticket_id}. I am now looking into this for you."
+            response = f"Ticket successfully created. ID: {ticket_ref}. I am now looking into this for you."
             print(f"   ✅ Result: {response}")
-            logger.info(f"Ticket created: {ticket_id}")
+            logger.info(f"Ticket created: {ticket_id} (Ref: {ticket_ref})")
             return response
 
     except Exception as e:

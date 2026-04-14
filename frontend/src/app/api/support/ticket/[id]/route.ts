@@ -8,14 +8,11 @@ export async function GET(
     const { id } = await params;
     const backendUrl = process.env.BACKEND_URL || 'http://127.0.0.1:8000';
 
-    console.log(`Forwarding status request for ticket ${id} to backend`);
-
     const response = await fetch(`${backendUrl}/api/support/ticket/${id}`, {
       method: 'GET',
       headers: {
         'Accept': 'application/json',
       },
-      // Ensure we don't cache status lookups
       cache: 'no-store'
     });
 
@@ -23,7 +20,7 @@ export async function GET(
       if (response.status === 404) {
         return NextResponse.json({ detail: "Ticket not found" }, { status: 404 });
       }
-      throw new Error(`Backend returned ${response.status}`);
+      return NextResponse.json({ detail: `Backend error: ${response.status}` }, { status: response.status });
     }
 
     const data = await response.json();

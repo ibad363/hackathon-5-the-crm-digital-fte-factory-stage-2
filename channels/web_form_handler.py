@@ -54,31 +54,10 @@ class SupportFormResponse(BaseModel):
     message: str
     estimated_response_time: str
 
-async def process_web_form_background(submission: SupportFormSubmission, ticket_ref: str):
+async def process_web_form_background(submission: SupportFormSubmission, ticket_ref: str, customer_id: str, conversation_id: str):
     """Background task for web-form submissions."""
     try:
-        # 1. Get or create customer
-        customer_id = await get_or_create_customer(
-            name=submission.name,
-            email=submission.email,
-        )
-        logger.info(f"   👤 Customer ID: {customer_id}")
-
-        # 2. Start a new conversation thread
-        conversation_id = await start_conversation(customer_id, "web_form")
-        logger.info(f"   💬 Conversation ID: {conversation_id}")
-
-        # 3. Create ticket immediately and store the WEB- ref so it can be looked up
-        pool = await get_db_pool()
-        async with pool.acquire() as conn:
-            await conn.execute("""
-                INSERT INTO tickets (conversation_id, customer_id, source_channel, category, priority, external_ref)
-                VALUES ($1, $2, 'web_form', $3, $4, $5)
-            """, conversation_id, customer_id,
-                submission.category, submission.priority or 'medium', ticket_ref)
-        logger.info(f"   🎫 Ticket created with ref: {ticket_ref}")
-
-        # 4. Log the inbound message
+        # 1. Log the inbound message
         enhanced_subject = f"[{submission.category.upper()}] {submission.subject}"
         full_message = f"Subject: {enhanced_subject}\n\n{submission.message}"
 
@@ -90,7 +69,7 @@ async def process_web_form_background(submission: SupportFormSubmission, ticket_
             content=full_message,
         )
 
-        # 5. Run the AI agent
+        # 2. Run the AI agent
         agent_response = await process_customer_message(
             customer_id=customer_id,
             conversation_id=conversation_id,
@@ -99,7 +78,7 @@ async def process_web_form_background(submission: SupportFormSubmission, ticket_
         )
         logger.info(f"   🤖 Agent response ready ({len(agent_response)} chars)")
 
-        # 6. Log the outbound message
+        # 3. Log the outbound message
         await log_message(
             conversation_id=conversation_id,
             channel="web_form",
@@ -108,7 +87,8 @@ async def process_web_form_background(submission: SupportFormSubmission, ticket_
             content=agent_response,
         )
 
-        # 7. Update ticket status to resolved if it wasn't escalated
+        # 4. Update ticket status to resolved if it wasn't escalated
+        pool = await get_db_pool()
         async with pool.acquire() as conn:
             await conn.execute("""
                 UPDATE tickets
@@ -116,7 +96,7 @@ async def process_web_form_background(submission: SupportFormSubmission, ticket_
                 WHERE external_ref = $1 AND status = 'open'
             """, ticket_ref)
 
-        # 8. Send the email reply via Gmail API
+        # 5. Send the email reply via Gmail API
         try:
             handler = get_gmail_handler()
             await handler.send_reply(
@@ -139,17 +119,37 @@ async def submit_support_form(submission: SupportFormSubmission, background_task
 
     This endpoint:
     1. Validates the submission
-    2. Creates a ticket ID
-    3. Triggers the AI Agent in the background
-    4. Returns confirmation to user immediately
+    2. Creates a ticket ID immediately
+    3. Saves ticket to DB immediately to avoid 404 race condition
+    4. Triggers the AI Agent in the background
     """
     logger.info(f"🌐 Web form | from={submission.name} <{submission.email}> | subject={submission.subject!r}")
 
-    # Generate unique ticket ID
+    # 1. Generate unique ticket ID
     ticket_ref = f"WEB-{datetime.utcnow().strftime('%Y%m%d%H%M%S')}"
 
-    # Process the actual AI logic in the background
-    background_tasks.add_task(process_web_form_background, submission, ticket_ref)
+    # 2. Create customer and conversation immediately (in main thread)
+    customer_id = await get_or_create_customer(
+        name=submission.name,
+        email=submission.email,
+    )
+    conversation_id = await start_conversation(customer_id, "web_form")
+
+    # 3. Create ticket immediately so the lookup doesn't 404
+    pool = await get_db_pool()
+    async with pool.acquire() as conn:
+        # Use a transaction block to ensure data is committed before we return
+        async with conn.transaction():
+            await conn.execute("""
+                INSERT INTO tickets (conversation_id, customer_id, source_channel, category, priority, external_ref)
+                VALUES ($1, $2, 'web_form', $3, $4, $5)
+            """, conversation_id, customer_id,
+                submission.category, submission.priority or 'medium', ticket_ref)
+
+    logger.info(f"   🎫 Ticket created and COMMITTED: {ticket_ref}")
+
+    # 4. Process the heavy AI logic in the background
+    background_tasks.add_task(process_web_form_background, submission, ticket_ref, customer_id, conversation_id)
 
     return SupportFormResponse(
         ticket_id=ticket_ref,
@@ -162,6 +162,7 @@ async def get_ticket_status(ticket_id: str):
     """Get status and conversation history for a ticket."""
     from database.queries import get_db_pool
 
+    logger.info(f"🔍 Looking up ticket status for: {ticket_id}")
     pool = await get_db_pool()
     async with pool.acquire() as conn:
         # Fetch ticket details
@@ -172,7 +173,12 @@ async def get_ticket_status(ticket_id: str):
         """, ticket_id)
 
         if not ticket:
-            raise HTTPException(status_code=404, detail="Ticket not found")
+            # Let's check if there are ANY tickets to see if the table is empty or connection is wrong
+            count = await conn.fetchval("SELECT COUNT(*) FROM tickets")
+            logger.warning(f"❌ Ticket {ticket_id} NOT found in DB. Total tickets in DB: {count}")
+            raise HTTPException(status_code=404, detail=f"Ticket {ticket_id} not found")
+
+        logger.info(f"✅ Found ticket {ticket_id} (Internal ID: {ticket['id']})")
 
         # Use external_ref as ticket_id for the UI if it exists
         display_id = ticket['external_ref'] or str(ticket['id'])
