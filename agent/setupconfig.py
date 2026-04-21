@@ -42,7 +42,7 @@ external_client = AsyncOpenAI(
 )
 
 model = OpenAIChatCompletionsModel(
-    model="qw/qwen3-coder-plus",
+    model="oc/nemotron-3-super-free",
     openai_client=external_client,
 )
 

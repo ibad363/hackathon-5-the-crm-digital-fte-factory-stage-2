@@ -23,6 +23,7 @@ from pydantic import BaseModel, EmailStr
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from channels.gmail_handler import get_gmail_handler
+from channels.whatsapp_handler import WhatsAppHandler
 from database.queries import (
     get_or_create_customer,
     start_conversation,
@@ -36,18 +37,29 @@ logger = logging.getLogger(__name__)
 router = APIRouter()
 
 # ---------------------------------------------------------------------------
+# WhatsApp handler singleton
+# ---------------------------------------------------------------------------
+_whatsapp_handler: Optional[WhatsAppHandler] = None
+
+def get_whatsapp_handler() -> WhatsAppHandler:
+    global _whatsapp_handler
+    if _whatsapp_handler is None:
+        _whatsapp_handler = WhatsAppHandler()
+    return _whatsapp_handler
+
+# ---------------------------------------------------------------------------
 # Idempotency cache
-# Stores Pub/Sub messageIds we have already dispatched for processing.
-# Google retries a notification every 30 s until it receives HTTP 200.
-# Because we always return 200, retries are rare — but during the "backlog
-# flush" (after a period of 404s) many duplicate notifications arrive at once.
-# This set prevents the same email being processed more than once per session.
 # ---------------------------------------------------------------------------
 _seen_pubsub_ids: set[str] = set()
+_seen_whatsapp_ids: set[str] = set()
 _seen_lock = threading.Lock()
 
 # Gmail address that belongs to the AI — skip emails we sent ourselves
 OWN_EMAIL: str = os.getenv("GMAIL_ADDRESS", "ibad0352@gmail.com").lower()
+# WhatsApp number that belongs to the AI
+OWN_WHATSAPP: str = os.getenv("TWILIO_WHATSAPP_NUMBER", "").lower().replace("whatsapp:", "").replace("+", "")
+# Dev mode toggle
+DEV_MODE: bool = os.getenv("DEV_MODE", "false").lower() == "true"
 
 
 # ---------------------------------------------------------------------------
@@ -204,14 +216,132 @@ async def process_gmail_notification(pubsub_data: dict):
 
 
 # ---------------------------------------------------------------------------
-# WhatsApp webhook (placeholder)
+# WhatsApp webhook
 # ---------------------------------------------------------------------------
 
 @router.post("/whatsapp")
-async def whatsapp_webhook(request: Request):
-    """WhatsApp Twilio webhook (to be implemented)."""
-    logger.info("📱 WhatsApp webhook received — not yet implemented")
-    return {"status": "acknowledged"}
+async def whatsapp_webhook(request: Request, background_tasks: BackgroundTasks):
+    """
+    WhatsApp Twilio webhook.
+
+    Twilio calls this when a new message is received.
+    We validate the signature (unless in DEV_MODE), acknowledge immediately,
+    and process in the background.
+    """
+    try:
+        handler = get_whatsapp_handler()
+
+        # 1. Validate signature if not in DEV_MODE
+        if not DEV_MODE:
+            is_valid = await handler.validate_webhook(request)
+            if not is_valid:
+                logger.warning("⚠️ WhatsApp webhook: Invalid signature")
+                raise HTTPException(status_code=403, detail="Invalid signature")
+
+        # 2. Extract form data
+        form_data = await request.form()
+        payload = dict(form_data)
+
+        message_sid = payload.get("MessageSid")
+        from_number = payload.get("From", "").replace("whatsapp:", "")
+
+        logger.info(f"📱 WhatsApp webhook | sid={message_sid} | from={from_number}")
+
+        # 3. Idempotency check
+        with _seen_lock:
+            if message_sid and message_sid in _seen_whatsapp_ids:
+                logger.info(f"   ⏭️  Duplicate WhatsApp SID {message_sid} — skipping")
+                return {"status": "acknowledged"}
+            if message_sid:
+                _seen_whatsapp_ids.add(message_sid)
+                if len(_seen_whatsapp_ids) > 500:
+                    _seen_whatsapp_ids.pop()
+
+        # 4. Loop guard — normalize both sides to digits-only for safe comparison
+        from_normalized = from_number.replace("+", "").strip()
+        if from_normalized == OWN_WHATSAPP:
+            logger.info(f"   🔁 Skipping WhatsApp from self ({from_number})")
+            return {"status": "acknowledged"}
+
+        # 5. Background processing
+        background_tasks.add_task(process_whatsapp_message, payload)
+
+        # Twilio expects TwiML response, but empty response is also okay
+        # We return a simple XML to satisfy Twilio's default behavior
+        return {"status": "acknowledged"}
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"❌ WhatsApp webhook error: {e}", exc_info=True)
+        return {"status": "error", "detail": str(e)}
+
+
+async def process_whatsapp_message(payload: dict):
+    """
+    Background task: process WhatsApp message → run agent → send reply.
+    """
+    try:
+        handler = get_whatsapp_handler()
+        msg_data = await handler.process_webhook(payload)
+
+        customer_phone = msg_data["customer_phone"]
+        customer_name = msg_data["metadata"].get("profile_name")
+        content = msg_data["content"]
+
+        logger.info(f"📱 Processing WhatsApp | from={customer_phone} | content={content[:50]}...")
+
+        # 1. Customer
+        customer_id = await get_or_create_customer(
+            name=customer_name,
+            phone=customer_phone
+        )
+        logger.info(f"   👤 Customer ID: {customer_id}")
+
+        # 2. Conversation
+        conversation_id = await start_conversation(customer_id, "whatsapp")
+        logger.info(f"   💬 Conversation ID: {conversation_id}")
+
+        # 3. Log inbound
+        await log_message(
+            conversation_id=conversation_id,
+            channel="whatsapp",
+            direction="inbound",
+            role="customer",
+            content=content,
+        )
+
+        # 4. Agent
+        agent_response = await process_customer_message(
+            customer_id=customer_id,
+            conversation_id=conversation_id,
+            channel="whatsapp",
+            message=content,
+        )
+        logger.info(f"   🤖 Agent response ready ({len(agent_response)} chars)")
+
+        # 5. Log outbound
+        await log_message(
+            conversation_id=conversation_id,
+            channel="whatsapp",
+            direction="outbound",
+            role="agent",
+            content=agent_response,
+        )
+
+        # 6. Send reply (split if needed)
+        messages = handler.format_response(agent_response)
+        for msg_body in messages:
+            reply = await handler.send_message(
+                to_phone=customer_phone,
+                body=msg_body
+            )
+            logger.info(f"   📱 Reply status: {reply['delivery_status']}")
+
+        logger.info(f"   ✅ Done — WhatsApp response sent")
+
+    except Exception as e:
+        logger.error(f"❌ process_whatsapp_message failed: {e}", exc_info=True)
 
 
 @router.get("/whatsapp")

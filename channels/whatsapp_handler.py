@@ -6,9 +6,9 @@ from datetime import datetime
 
 class WhatsAppHandler:
     def __init__(self):
-        self.account_sid = os.getenv('TWILIO_ACCOUNT_SID')
-        self.auth_token = os.getenv('TWILIO_AUTH_TOKEN')
-        self.whatsapp_number = os.getenv('TWILIO_WHATSAPP_NUMBER')  # e.g., 'whatsapp:+14155238886'
+        self.account_sid = os.getenv('TWILIO_ACCOUNT_SID', 'AC' + '0' * 32)
+        self.auth_token = os.getenv('TWILIO_AUTH_TOKEN', '0' * 32)
+        self.whatsapp_number = os.getenv('TWILIO_WHATSAPP_NUMBER', 'whatsapp:+14155238886')
         self.client = Client(self.account_sid, self.auth_token)
         self.validator = RequestValidator(self.auth_token)
     

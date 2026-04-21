@@ -67,40 +67,43 @@ async def generate_embedding(text: str) -> List[float]:
 async def get_or_create_customer(name: str = None, email: str = None, phone: str = None) -> str:
     """
     Find a customer by email/phone or create a new one.
-    Uses INSERT ... ON CONFLICT to avoid race conditions.
+    Uses a SELECT first then INSERT approach since 'phone' doesn't have a UNIQUE constraint in the schema.
     """
     pool = await get_db_pool()
     async with pool.acquire() as conn:
+        # Normalize inputs
+        email = email.lower() if email else None
+        phone = phone.strip() if phone else None
+
         # 1. Search for existing customer first
         if email:
             customer = await conn.fetchrow("SELECT id FROM customers WHERE email = $1", email)
             if customer:
                 return str(customer['id'])
+
         if phone:
             customer = await conn.fetchrow("SELECT id FROM customers WHERE phone = $1", phone)
             if customer:
                 return str(customer['id'])
 
-        # 2. Use INSERT ... ON CONFLICT to safely upsert
+        # 2. If not found, insert
+        # If email is provided, we can use ON CONFLICT (email) because it is UNIQUE in schema
         if email:
             customer_id = await conn.fetchval("""
                 INSERT INTO customers (name, email, phone)
                 VALUES ($1, $2, $3)
-                ON CONFLICT (email) DO UPDATE SET name = COALESCE(EXCLUDED.name, customers.name)
-                RETURNING id
-            """, name or "Unknown Customer", email, phone)
-        elif phone:
-            customer_id = await conn.fetchval("""
-                INSERT INTO customers (name, email, phone)
-                VALUES ($1, $2, $3)
-                ON CONFLICT (phone) DO UPDATE SET name = COALESCE(EXCLUDED.name, customers.name)
+                ON CONFLICT (email) DO UPDATE SET
+                    name = CASE WHEN customers.name = 'Unknown Customer' OR customers.name IS NULL THEN EXCLUDED.name ELSE customers.name END,
+                    phone = COALESCE(customers.phone, EXCLUDED.phone)
                 RETURNING id
             """, name or "Unknown Customer", email, phone)
         else:
-            customer_id = await conn.fetchval(
-                "INSERT INTO customers (name) VALUES ($1) RETURNING id",
-                name or "Unknown Customer"
-            )
+            # For phone-only or name-only, just insert (since phone isn't UNIQUE)
+            customer_id = await conn.fetchval("""
+                INSERT INTO customers (name, email, phone)
+                VALUES ($1, $2, $3)
+                RETURNING id
+            """, name or "Unknown Customer", email, phone)
 
         return str(customer_id)
 
