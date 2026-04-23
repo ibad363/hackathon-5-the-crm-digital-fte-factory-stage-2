@@ -31,6 +31,7 @@ from database.queries import (
     create_ticket
 )
 from agent.customer_success_agent import process_customer_message
+from messaging.kafka_client import KafkaClient
 
 logger = logging.getLogger(__name__)
 
@@ -74,7 +75,7 @@ async def gmail_ping():
 
 
 @router.post("/gmail")
-async def gmail_webhook(request: Request, background_tasks: BackgroundTasks):
+async def gmail_webhook(request: Request):
     """
     Gmail Pub/Sub push endpoint.
 
@@ -115,8 +116,17 @@ async def gmail_webhook(request: Request, background_tasks: BackgroundTasks):
                 if len(_seen_pubsub_ids) > 500:
                     _seen_pubsub_ids.pop()
 
-        # Hand off to background task and return 200 immediately
-        background_tasks.add_task(process_gmail_notification, pubsub_data)
+        # Hand off to Kafka and return 200 immediately
+        handler = get_gmail_handler()
+        messages = await handler.process_pubsub_notification(pubsub_data)
+
+        if messages:
+            for email_msg in messages:
+                await KafkaClient.publish("incoming", {
+                    "channel": "email",
+                    "email_msg": email_msg
+                })
+
         return {"status": "acknowledged"}
 
     except Exception as e:
@@ -220,7 +230,7 @@ async def process_gmail_notification(pubsub_data: dict):
 # ---------------------------------------------------------------------------
 
 @router.post("/whatsapp")
-async def whatsapp_webhook(request: Request, background_tasks: BackgroundTasks):
+async def whatsapp_webhook(request: Request):
     """
     WhatsApp Twilio webhook.
 
@@ -263,8 +273,12 @@ async def whatsapp_webhook(request: Request, background_tasks: BackgroundTasks):
             logger.info(f"   🔁 Skipping WhatsApp from self ({from_number})")
             return {"status": "acknowledged"}
 
-        # 5. Background processing
-        background_tasks.add_task(process_whatsapp_message, payload)
+        # 5. Hand off to Kafka
+        msg_data = await handler.process_webhook(payload)
+        await KafkaClient.publish("incoming", {
+            "channel": "whatsapp",
+            "msg_data": msg_data
+        })
 
         # Twilio expects TwiML response, but empty response is also okay
         # We return a simple XML to satisfy Twilio's default behavior

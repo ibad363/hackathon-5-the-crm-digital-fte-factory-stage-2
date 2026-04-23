@@ -27,46 +27,48 @@ The project evolves from a general prototype to a production-grade specialized a
    - Custom PostgreSQL schema created with tables for: `customers`, `customer_identifiers`, `conversations`, `messages`, `tickets`, `knowledge_base`, `channel_configs`, and `agent_metrics`.
    - `pgvector` extension enabled for semantic search.
    - Singleton connection pooling implemented via `asyncpg` to prevent "too many clients" errors.
-   - Database queries written for all core operations.
    - **Database Migration:** Added `external_ref` column to `tickets` table to support human-readable Web Form IDs (`WEB-YYYYMMDD...`).
 
 2. **Knowledge Base & Embeddings**
    - Successfully integrated a free, local SentenceTransformer model (`all-MiniLM-L6-v2`).
-   - **Markdown Chunking:** Implemented a robust chunking script in `seed_kb.py` that splits product documentation by H2/H3 headers, significantly improving search relevance.
-   - **Search Optimization:** Switched `pgvector` operators from Cosine Distance (`<=>`) to Inner Product (`<#>`) and added vector normalization, resulting in similarity scores jumping from 0.17 to 0.80 for technical queries.
+   - **Markdown Chunking:** Implemented a robust chunking script in `seed_kb.py` that splits product documentation by H2/H3 headers.
+   - **Search Optimization:** Switched `pgvector` operators from Cosine Distance (`<=>`) to Inner Product (`<#>`) and added vector normalization.
 
 3. **Agent Setup & Tool Alignment**
    - Agent initialized using OpenAI Agents SDK.
    - Tools aligned with the database schema: `search_knowledge_base`, `create_ticket`, `get_customer_history`, `escalate_to_human`, `send_response`.
-   - **Idempotency:** Updated `create_ticket` tool to handle existing tickets gracefully, preventing the agent from "Technical Difficulty" loops when a ticket was already created by a webhook.
-   - System prompt meticulously crafted to match the TaskVault company profile, brand voice, and escalation rules (including the E.A.R. method for angry customers).
+   - System prompt meticulously crafted to match the TaskVault company profile.
 
 4. **Gmail Integration (Push-Based via Pub/Sub)**
-   - **OAuth Flow:** Configured desktop app credentials (`gmail_auth.py`).
-   - **Pub/Sub Webhook:** FastAPI endpoint (`/api/webhooks/gmail`) receiving real-time push notifications from Google.
-   - **State Persistence:** Created `integration_state` table to persist `last_history_id`, surviving server restarts and preventing infinite backlog flushing.
-   - **Filtering Logic:** Added robust filters to ignore our own sent messages, automated bounces (`mailer-daemon`, `noreply`), and messages older than 15 minutes.
-   - **End-to-End Flow:** Successfully tested receiving an email, finding/creating the customer, logging the message, running the agent, sending a threaded reply, and marking the original email as read with a custom label (`TaskVault/Processed`).
+   - **OAuth Flow:** Configured desktop app credentials.
+   - **Pub/Sub Webhook:** FastAPI endpoint receiving real-time push notifications.
+   - **State Persistence:** Created `integration_state` table to persist `last_history_id`.
+   - **Filtering Logic:** Added robust filters to ignore our own sent messages and automated bounces.
 
 5. **Web Support Form (Production Grade)**
-   - **Frontend:** Completed React/Next.js frontend with Tailwind CSS. Features real-time validation and character counting.
-   - **Ticket Tracking:** Built a dedicated **Ticket Status Portal** (`/ticket/[id]`) that allows users to track their conversation with the AI in real-time using a chat-bubble UI.
-   - **Integration:** Successfully wired the Next.js API proxy to a dedicated FastAPI `web_form_handler.py`.
-   - **Race Condition Fix:** Moved ticket creation logic into the main request thread to ensure records exist in the database before the frontend redirects to the status portal, eliminating 404 errors.
-   - **Real-time Updates:** Implemented auto-polling on the ticket status page to show AI responses as they are generated.
+   - **Frontend:** Completed React/Next.js frontend.
+   - **Ticket Tracking:** Built a dedicated **Ticket Status Portal**.
+
+6. **WhatsApp Integration**
+   - Implemented the Twilio webhook handler (`/api/webhooks/whatsapp`).
+
+7. **Event-Driven Architecture (Kafka)**
+   - Deployed **Apache Kafka** and **Zookeeper** via Docker (`confluentinc/cp-kafka:7.4.0`).
+   - Built a singleton Kafka client (`messaging/kafka_client.py`).
+   - Refactored API endpoints to act purely as **Producers**, instantly acknowledging webhooks and publishing events to `fte.tickets.incoming`.
+   - Built the **Unified Message Processor** (`workers/unified_processor.py`) as an independent **Consumer** to handle the heavy AI workload, decoupling the FastAPI server and resolving `WinError 10053` crashes.
 
 ### 🚧 What is In Progress / Needs Debugging
-- **Network Resilience:** The local Windows environment occasionally aborts established connections (`WinError 10053`) during long-running Gmail API calls.
-- **LLM Context management:** Fine-tuning the balance between chunk size and LLM context window to ensure the most accurate responses.
+- **Agent Tool-Call Loop (ROOT CAUSE FOUND):** Since decoupling, the OpenAI Agent was failing to execute tools (specifically `create_ticket`) because it was passing arguments as a string rather than a dictionary, triggering Pydantic validation errors. This caused the 6-minute loop and empty email bodies.
+- **Fix:** Refactoring `agent/tools.py` to use flat parameters instead of nested Pydantic models for better SDK compatibility.
+- **LLM Context management:** Fine-tuning the balance between chunk size and LLM context window.
 
 ### ❌ What is Remaining (Next Steps)
-1. **WhatsApp Integration:** Implement the Twilio webhook handler (`/api/webhooks/whatsapp`) following the same robust pattern used for Gmail and Web Form.
-2. **Event-Driven Architecture:** Fully implement Kafka topics (`fte.tickets.incoming`, etc.) to decouple message intake from agent processing and solve connection abort issues.
-3. **Testing & Infrastructure:** 
+1. **Testing & Infrastructure:** 
    - Write Locust scripts for load testing.
-   - Dockerize the application.
+   - Dockerize the Python application (API and Worker).
    - Set up Kubernetes (K8s) manifests with Horizontal Pod Autoscaler (HPA).
-4. **The Final 24-Hour Challenge:** Pressure test the system with 100+ web forms, 50+ emails, and 50+ WhatsApp messages with zero data loss.
+2. **The Final 24-Hour Challenge:** Pressure test the system with 100+ web forms, 50+ emails, and 50+ WhatsApp messages with zero data loss.
 
 ---
 

@@ -1,4 +1,4 @@
-from fastapi import APIRouter, HTTPException, BackgroundTasks
+from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, EmailStr, validator
 from datetime import datetime
 from typing import Optional
@@ -12,8 +12,7 @@ from database.queries import (
     get_db_pool,
     create_ticket,
 )
-from agent.customer_success_agent import process_customer_message
-from channels.gmail_handler import get_gmail_handler
+from messaging.kafka_client import KafkaClient
 
 logger = logging.getLogger(__name__)
 
@@ -54,66 +53,8 @@ class SupportFormResponse(BaseModel):
     message: str
     estimated_response_time: str
 
-async def process_web_form_background(submission: SupportFormSubmission, ticket_ref: str, customer_id: str, conversation_id: str):
-    """Background task for web-form submissions."""
-    try:
-        # 1. Log the inbound message
-        enhanced_subject = f"[{submission.category.upper()}] {submission.subject}"
-        full_message = f"Subject: {enhanced_subject}\n\n{submission.message}"
-
-        await log_message(
-            conversation_id=conversation_id,
-            channel="web_form",
-            direction="inbound",
-            role="customer",
-            content=full_message,
-        )
-
-        # 2. Run the AI agent
-        agent_response = await process_customer_message(
-            customer_id=customer_id,
-            conversation_id=conversation_id,
-            channel="web_form",
-            message=full_message,
-        )
-        logger.info(f"   🤖 Agent response ready ({len(agent_response)} chars)")
-
-        # 3. Log the outbound message
-        await log_message(
-            conversation_id=conversation_id,
-            channel="web_form",
-            direction="outbound",
-            role="agent",
-            content=agent_response,
-        )
-
-        # 4. Update ticket status to resolved if it wasn't escalated
-        pool = await get_db_pool()
-        async with pool.acquire() as conn:
-            await conn.execute("""
-                UPDATE tickets
-                SET status = 'resolved', resolved_at = NOW()
-                WHERE external_ref = $1 AND status = 'open'
-            """, ticket_ref)
-
-        # 5. Send the email reply via Gmail API
-        try:
-            handler = get_gmail_handler()
-            await handler.send_reply(
-                to_email=submission.email,
-                subject=f"Re: {submission.subject} [{ticket_ref}]",
-                body=agent_response,
-            )
-            logger.info(f"   ✉️  Email response sent to {submission.email}")
-        except Exception as mail_err:
-            logger.error(f"   ❌ Failed to send email response: {mail_err}")
-
-    except Exception as e:
-        logger.error(f"❌ process_web_form_background failed: {e}", exc_info=True)
-
-
 @router.post("/submit", response_model=SupportFormResponse)
-async def submit_support_form(submission: SupportFormSubmission, background_tasks: BackgroundTasks):
+async def submit_support_form(submission: SupportFormSubmission):
     """
     Handle support form submission.
 
@@ -121,7 +62,7 @@ async def submit_support_form(submission: SupportFormSubmission, background_task
     1. Validates the submission
     2. Creates a ticket ID immediately
     3. Saves ticket to DB immediately to avoid 404 race condition
-    4. Triggers the AI Agent in the background
+    4. Publishes event to Kafka for async AI processing by the worker
     """
     logger.info(f"🌐 Web form | from={submission.name} <{submission.email}> | subject={submission.subject!r}")
 
@@ -148,8 +89,21 @@ async def submit_support_form(submission: SupportFormSubmission, background_task
 
     logger.info(f"   🎫 Ticket created and COMMITTED: {ticket_ref}")
 
-    # 4. Process the heavy AI logic in the background
-    background_tasks.add_task(process_web_form_background, submission, ticket_ref, customer_id, conversation_id)
+    # 4. Publish to Kafka for async processing by the unified worker
+    await KafkaClient.publish("incoming", {
+        "channel": "web_form",
+        "ticket_ref": ticket_ref,
+        "customer_id": str(customer_id),
+        "conversation_id": str(conversation_id),
+        "submission": {
+            "name": submission.name,
+            "email": submission.email,
+            "subject": submission.subject,
+            "category": submission.category,
+            "message": submission.message,
+            "priority": submission.priority,
+        }
+    })
 
     return SupportFormResponse(
         ticket_id=ticket_ref,
