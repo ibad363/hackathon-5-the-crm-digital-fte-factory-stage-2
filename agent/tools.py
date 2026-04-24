@@ -30,11 +30,18 @@ async def search_knowledge_base(query: str, category: str = "", max_results: int
     """Search product documentation for relevant information.
     Use this when the customer asks questions about product features,
     how to use something, or needs technical information.
+
+    Allowed Categories:
+    - 'Product': Use for features, integrations (Slack, etc.), and troubleshooting.
+    - 'Company': Use for company info, hours, and policies.
+    - 'Voice': Use for brand tone and response style guidelines.
+    - 'Escalation': Use for rules on when to hand off to humans.
+
     Returns: Formatted search results with relevance scores.
     """
     print(f"\n🔍 [TOOL CALL] search_knowledge_base")
     print(f"   Query: {query}")
-    print(f"   Category: {category}")
+    print(f"   Category Filter: {category}")
 
     try:
         pool = await get_db_pool()
@@ -63,9 +70,8 @@ async def search_knowledge_base(query: str, category: str = "", max_results: int
                 """, embedding_str, max_results)
 
             if not results:
-                response = "No relevant documentation found. Consider escalating to human support."
-                print(f"   ❌ Result: {response}")
-                return response
+                print(f"   ❌ [TOOL RESULT] No results found in KB.")
+                return "No relevant documentation found. Consider escalating to human support."
 
             # Format results for the agent
             formatted = []
@@ -73,7 +79,8 @@ async def search_knowledge_base(query: str, category: str = "", max_results: int
                 formatted.append(f"**{r['title']}** (Category: {r['category']}, Relevance: {r['similarity']:.2f})\n{r['content'][:500]}...")
 
             response = "\n\n---\n\n".join(formatted)
-            print(f"   ✅ Result: Found {len(results)} results")
+            print(f"   ✅ [TOOL RESULT] Found {len(results)} results.")
+            print(f"      Top Match: {results[0]['title']} (Score: {results[0]['similarity']:.2f})")
             return response
 
     except Exception as e:
@@ -238,21 +245,53 @@ async def send_response(conversation_id: str, channel: str, content: str) -> str
         conv_id = clean_uuid(conversation_id)
         pool = await get_db_pool()
         async with pool.acquire() as conn:
-            # Log the outbound message in the database with role='agent'
+            # 1. Log the outbound message in the database
             await conn.execute("""
                 INSERT INTO messages (conversation_id, channel, direction, role, content, delivery_status)
                 VALUES ($1, $2, 'outbound', 'agent', $3, 'sent')
             """, conv_id, channel, content)
 
-            # Trigger the channel dispatcher (this will be picked up by a Kafka producer or specific handler)
-            logger.info(f"RESPONSE DISPATCHED to {channel.upper()}: {content[:50]}...")
+            # 2. Dispatch to the actual channel handler
+            if channel == "email" or channel == "web_form":
+                from channels.gmail_handler import get_gmail_handler
+
+                # Find customer email from DB
+                cust_data = await conn.fetchrow("""
+                    SELECT c.email FROM customers c
+                    JOIN conversations conv ON c.id = conv.customer_id
+                    WHERE conv.id = $1
+                """, conv_id)
+
+                if cust_data and cust_data['email']:
+                    handler = get_gmail_handler()
+                    await handler.send_reply(
+                        to_email=cust_data['email'],
+                        subject="Re: TaskVault Support Request",
+                        body=content
+                    )
+                    logger.info(f"✅ Response sent via GMAIL to {cust_data['email']}")
+
+            elif channel == "whatsapp":
+                from channels.whatsapp_handler import WhatsAppHandler
+
+                # Find customer phone from DB
+                cust_data = await conn.fetchrow("""
+                    SELECT c.phone FROM customers c
+                    JOIN conversations conv ON c.id = conv.customer_id
+                    WHERE conv.id = $1
+                """, conv_id)
+
+                if cust_data and cust_data['phone']:
+                    handler = WhatsAppHandler()
+                    messages = handler.format_response(content)
+                    for msg_body in messages:
+                        await handler.send_message(to_phone=cust_data['phone'], body=msg_body)
+                    logger.info(f"✅ Response sent via WHATSAPP to {cust_data['phone']}")
 
             response = f"Response successfully sent via {channel.upper()}."
             print(f"   ✅ Result: {response}")
             return response
 
     except Exception as e:
-        logger.error(f"Response dispatch failed: {e}")
-        response = "Failed to send response. Please try again."
-        print(f"   ❌ Error: {e}")
-        return response
+        logger.error(f"Response dispatch failed: {e}", exc_info=True)
+        return "Failed to send response. Please try again."

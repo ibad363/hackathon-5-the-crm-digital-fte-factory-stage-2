@@ -81,35 +81,16 @@ async def process_email_event(payload: Dict[str, Any]) -> None:
 
     # 4. Agent
     full_message = f"Subject: {email_msg['subject']}\n\n{email_msg['content']}"
-    agent_response = await process_customer_message(
+    await process_customer_message(
         customer_id=customer_id,
         conversation_id=conversation_id,
         channel="email",
         message=full_message,
     )
-    logger.info("   🤖 Agent response ready (%d chars)", len(agent_response))
+    logger.info("   🤖 Agent processing complete (Response sent via tool)")
 
-    # 5. Log outbound
-    await log_message(
-        conversation_id=conversation_id,
-        channel="email",
-        direction="outbound",
-        role="agent",
-        content=agent_response,
-    )
-
-    # 6. Send reply
+    # 5. Housekeeping
     handler = get_gmail_handler()
-    reply = await handler.send_reply(
-        to_email=sender,
-        subject=email_msg["subject"],
-        body=agent_response,
-        thread_id=email_msg.get("thread_id"),
-        in_reply_to=email_msg.get("metadata", {}).get("headers", {}).get("message-id"),
-    )
-    logger.info("   ✉️  Reply status: %s", reply.get("delivery_status", "unknown"))
-
-    # 7. Housekeeping
     await handler.mark_as_read(email_msg["channel_message_id"])
     await handler.add_label(email_msg["channel_message_id"], "TaskVault/Processed")
     logger.info("   ✅ Done — email labelled & marked as read")
@@ -146,31 +127,13 @@ async def process_whatsapp_event(payload: Dict[str, Any]) -> None:
     )
 
     # 4. Agent
-    agent_response = await process_customer_message(
+    await process_customer_message(
         customer_id=customer_id,
         conversation_id=conversation_id,
         channel="whatsapp",
         message=content,
     )
-    logger.info("   🤖 Agent response ready (%d chars)", len(agent_response))
-
-    # 5. Log outbound
-    await log_message(
-        conversation_id=conversation_id,
-        channel="whatsapp",
-        direction="outbound",
-        role="agent",
-        content=agent_response,
-    )
-
-    # 6. Send reply (split if > 1600 chars)
-    handler = WhatsAppHandler()
-    messages = handler.format_response(agent_response)
-    for msg_body in messages:
-        reply = await handler.send_message(to_phone=customer_phone, body=msg_body)
-        logger.info("   📱 Reply status: %s", reply.get("delivery_status", "unknown"))
-
-    logger.info("   ✅ Done — WhatsApp response sent")
+    logger.info("   🤖 Agent processing complete (Response sent via tool)")
 
 
 async def process_web_form_event(payload: Dict[str, Any]) -> None:
@@ -202,22 +165,13 @@ async def process_web_form_event(payload: Dict[str, Any]) -> None:
     )
 
     # 2. Run the AI agent
-    agent_response = await process_customer_message(
+    await process_customer_message(
         customer_id=customer_id,
         conversation_id=conversation_id,
         channel="web_form",
         message=full_message,
     )
-    logger.info("   🤖 Agent response ready (%d chars)", len(agent_response))
-
-    # 3. Log the outbound message
-    await log_message(
-        conversation_id=conversation_id,
-        channel="web_form",
-        direction="outbound",
-        role="agent",
-        content=agent_response,
-    )
+    logger.info("   🤖 Agent processing complete (Response sent via tool)")
 
     # 4. Update ticket status to resolved (unless escalated)
     pool = await get_db_pool()
@@ -230,18 +184,6 @@ async def process_web_form_event(payload: Dict[str, Any]) -> None:
             """,
             ticket_ref,
         )
-
-    # 5. Send the email reply via Gmail API
-    try:
-        handler = get_gmail_handler()
-        await handler.send_reply(
-            to_email=email,
-            subject=f"Re: {subject} [{ticket_ref}]",
-            body=agent_response,
-        )
-        logger.info("   ✉️  Email response sent to %s", email)
-    except Exception as mail_err:
-        logger.error("   ❌ Failed to send email response: %s", mail_err)
 
 
 # ---------------------------------------------------------------------------
