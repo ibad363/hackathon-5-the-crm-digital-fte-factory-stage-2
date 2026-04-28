@@ -9,6 +9,7 @@ Handles webhooks, REST endpoints, and integrations.
 import os
 import sys
 import logging
+import asyncio
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
@@ -19,6 +20,8 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from api.webhooks import router as webhooks_router
 from channels.web_form_handler import router as web_form_router
+from messaging.kafka_client import KafkaClient
+from channels.gmail_handler import get_gmail_handler
 
 # Configure logging
 logging.basicConfig(
@@ -26,6 +29,25 @@ logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
 )
 logger = logging.getLogger(__name__)
+
+
+async def gmail_watch_renewal_loop():
+    """Background loop to renew Gmail watch every 24 hours."""
+    project_id = os.getenv("GOOGLE_CLOUD_PROJECT")
+    if not project_id:
+        logger.warning("⚠️ GOOGLE_CLOUD_PROJECT not set. Gmail auto-renewal disabled.")
+        return
+
+    while True:
+        try:
+            handler = get_gmail_handler()
+            result = await handler.setup_push_notifications(project_id)
+            logger.info(f"🔄 Gmail watch renewed automatically. Next renewal in 24h. HID: {result.get('historyId')}")
+        except Exception as e:
+            logger.error(f"❌ Failed to renew Gmail watch: {e}")
+
+        # Wait 24 hours (86400 seconds)
+        await asyncio.sleep(86400)
 
 
 @asynccontextmanager
@@ -37,10 +59,15 @@ async def lifespan(app: FastAPI):
     logger.info("📱 WhatsApp webhook ready at: /api/webhooks/whatsapp")
     logger.info("🌐 Web form endpoint ready at: /api/support/submit")
 
+    # Start the Gmail watch renewal loop in the background
+    renewal_task = asyncio.create_task(gmail_watch_renewal_loop())
+
     yield
 
     # Shutdown
     logger.info("👋 TaskVault CRM API shutting down...")
+    renewal_task.cancel()
+    await KafkaClient.shutdown()
 
 
 # Create FastAPI app

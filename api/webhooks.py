@@ -122,6 +122,8 @@ async def gmail_webhook(request: Request):
 
         if messages:
             for email_msg in messages:
+                # Add a unique key to prevent re-processing in the worker
+                # though idempotency should handle it, this is a clean handoff.
                 await KafkaClient.publish("incoming", {
                     "channel": "email",
                     "email_msg": email_msg
@@ -132,97 +134,7 @@ async def gmail_webhook(request: Request):
     except Exception as e:
         logger.error(f"❌ Gmail webhook parse error: {e}", exc_info=True)
         # Still return 200 — a non-200 triggers unlimited Pub/Sub retries
-        return {"status": "error", "detail": str(e)}
-
-
-async def process_gmail_notification(pubsub_data: dict):
-    """
-    Background task: fetch new emails → run agent → send reply.
-
-    Steps
-    -----
-    1. Ask Gmail API for messages added since last historyId
-    2. Skip emails that are SENT by us or FROM our own address
-    3. Upsert customer record in PostgreSQL
-    4. Create conversation + log inbound message
-    5. Run TaskVault agent
-    6. Log outbound message + send Gmail reply
-    7. Mark original as read, apply "TaskVault/Processed" label
-    """
-    try:
-        handler  = get_gmail_handler()
-        messages = await handler.process_pubsub_notification(pubsub_data)
-
-        if not messages:
-            logger.info("   📭 No new inbound emails to process")
-            return
-
-        for email_msg in messages:
-            sender = email_msg["customer_email"].lower()
-
-            # --- Loop guard: never reply to our own outbound messages ---
-            if sender == OWN_EMAIL:
-                logger.info(f"   🔁 Skipping email from self ({sender})")
-                continue
-
-            logger.info(f"📧 Processing | from={sender} | subject={email_msg['subject']!r}")
-
-            # 1. Customer
-            customer_id = await get_or_create_customer(
-                name=email_msg.get("customer_name"),
-                email=sender,
-            )
-            logger.info(f"   👤 Customer ID: {customer_id}")
-
-            # 2. Conversation
-            conversation_id = await start_conversation(customer_id, "email")
-            logger.info(f"   💬 Conversation ID: {conversation_id}")
-
-            # 3. Log inbound
-            await log_message(
-                conversation_id=conversation_id,
-                channel="email",
-                direction="inbound",
-                role="customer",
-                content=email_msg["content"],
-            )
-
-            # 4. Agent
-            full_message = f"Subject: {email_msg['subject']}\n\n{email_msg['content']}"
-            agent_response = await process_customer_message(
-                customer_id=customer_id,
-                conversation_id=conversation_id,
-                channel="email",
-                message=full_message,
-            )
-            logger.info(f"   🤖 Agent response ready ({len(agent_response)} chars)")
-
-            # 5. Log outbound
-            await log_message(
-                conversation_id=conversation_id,
-                channel="email",
-                direction="outbound",
-                role="agent",
-                content=agent_response,
-            )
-
-            # 6. Send reply
-            reply = await handler.send_reply(
-                to_email=sender,
-                subject=email_msg["subject"],
-                body=agent_response,
-                thread_id=email_msg.get("thread_id"),
-                in_reply_to=email_msg.get("metadata", {}).get("headers", {}).get("message-id"),
-            )
-            logger.info(f"   ✉️  Reply status: {reply['delivery_status']}")
-
-            # 7. Housekeeping
-            await handler.mark_as_read(email_msg["channel_message_id"])
-            await handler.add_label(email_msg["channel_message_id"], "TaskVault/Processed")
-            logger.info(f"   ✅ Done — email labelled & marked as read")
-
-    except Exception as e:
-        logger.error(f"❌ process_gmail_notification failed: {e}", exc_info=True)
+        return {"status": "acknowledged"}
 
 
 # ---------------------------------------------------------------------------
@@ -280,82 +192,20 @@ async def whatsapp_webhook(request: Request):
             "msg_data": msg_data
         })
 
-        # Twilio expects TwiML response, but empty response is also okay
-        # We return a simple XML to satisfy Twilio's default behavior
         return {"status": "acknowledged"}
 
     except HTTPException:
         raise
     except Exception as e:
         logger.error(f"❌ WhatsApp webhook error: {e}", exc_info=True)
-        return {"status": "error", "detail": str(e)}
+        return {"status": "acknowledged"}
 
 
 async def process_whatsapp_message(payload: dict):
     """
-    Background task: process WhatsApp message → run agent → send reply.
+    DEPRECATED: Background task moved to unified Kafka worker.
     """
-    try:
-        handler = get_whatsapp_handler()
-        msg_data = await handler.process_webhook(payload)
-
-        customer_phone = msg_data["customer_phone"]
-        customer_name = msg_data["metadata"].get("profile_name")
-        content = msg_data["content"]
-
-        logger.info(f"📱 Processing WhatsApp | from={customer_phone} | content={content[:50]}...")
-
-        # 1. Customer
-        customer_id = await get_or_create_customer(
-            name=customer_name,
-            phone=customer_phone
-        )
-        logger.info(f"   👤 Customer ID: {customer_id}")
-
-        # 2. Conversation
-        conversation_id = await start_conversation(customer_id, "whatsapp")
-        logger.info(f"   💬 Conversation ID: {conversation_id}")
-
-        # 3. Log inbound
-        await log_message(
-            conversation_id=conversation_id,
-            channel="whatsapp",
-            direction="inbound",
-            role="customer",
-            content=content,
-        )
-
-        # 4. Agent
-        agent_response = await process_customer_message(
-            customer_id=customer_id,
-            conversation_id=conversation_id,
-            channel="whatsapp",
-            message=content,
-        )
-        logger.info(f"   🤖 Agent response ready ({len(agent_response)} chars)")
-
-        # 5. Log outbound
-        await log_message(
-            conversation_id=conversation_id,
-            channel="whatsapp",
-            direction="outbound",
-            role="agent",
-            content=agent_response,
-        )
-
-        # 6. Send reply (split if needed)
-        messages = handler.format_response(agent_response)
-        for msg_body in messages:
-            reply = await handler.send_message(
-                to_phone=customer_phone,
-                body=msg_body
-            )
-            logger.info(f"   📱 Reply status: {reply['delivery_status']}")
-
-        logger.info(f"   ✅ Done — WhatsApp response sent")
-
-    except Exception as e:
-        logger.error(f"❌ process_whatsapp_message failed: {e}", exc_info=True)
+    pass
 
 
 @router.get("/whatsapp")
